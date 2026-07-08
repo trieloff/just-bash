@@ -241,6 +241,8 @@ const jqHelp = {
     "    --argjson NAME JSON   bind $NAME to the JSON-decoded value JSON",
     "    --rawfile NAME FILE   bind $NAME to the raw contents of FILE",
     "    --slurpfile NAME FILE bind $NAME to the array of JSON values in FILE",
+    "    --args        remaining arguments are string positional args ($ARGS.positional)",
+    "    --jsonargs    remaining arguments are JSON positional args ($ARGS.positional)",
     "    --help        display this help and exit",
   ],
 };
@@ -272,8 +274,10 @@ export const jqCommand: RuntimeCommand = {
     let useTab = false;
     let filter = ".";
     let filterSet = false;
+    let positionalMode: "none" | "args" | "jsonargs" = "none";
     const files: string[] = [];
     const namedArgs = new Map<string, QueryValue>();
+    const positionalArgs: QueryValue[] = [];
     const fileBindings: {
       name: string;
       file: string;
@@ -346,6 +350,14 @@ export const jqCommand: RuntimeCommand = {
         }
         fileBindings.push({ name, file, mode: "slurp" });
         i += 2;
+      } else if (a === "--args") {
+        // Remaining non-option tokens (after the filter) become string
+        // positional args instead of input files.
+        positionalMode = "args";
+      } else if (a === "--jsonargs") {
+        // Remaining non-option tokens (after the filter) are JSON-parsed and
+        // become positional args instead of input files.
+        positionalMode = "jsonargs";
       } else if (a === "-") files.push("-");
       else if (a.startsWith("--")) return unknownOption("jq", a);
       else if (a.startsWith("-")) {
@@ -367,8 +379,23 @@ export const jqCommand: RuntimeCommand = {
           } else return unknownOption("jq", `-${c}`);
         }
       } else if (!filterSet) {
+        // The first non-option token is always the filter, even when a
+        // positional mode has already been enabled by --args/--jsonargs.
         filter = a;
         filterSet = true;
+      } else if (positionalMode === "args") {
+        positionalArgs.push(a);
+      } else if (positionalMode === "jsonargs") {
+        let parsed: unknown[];
+        try {
+          parsed = parseJsonStream(a.trim());
+        } catch {
+          return jqArgError("invalid JSON text passed to --jsonargs");
+        }
+        if (parsed.length !== 1) {
+          return jqArgError("invalid JSON text passed to --jsonargs");
+        }
+        positionalArgs.push(parsed[0] as QueryValue);
       } else {
         files.push(a);
       }
@@ -452,6 +479,7 @@ export const jqCommand: RuntimeCommand = {
           : undefined,
         env: ctx.env,
         namedArgs,
+        positionalArgs,
         coverage: ctx.coverage,
         requireDefenseContext: ctx.requireDefenseContext,
         budget: { operations: 0, callDepth: 0 },
