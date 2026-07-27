@@ -283,6 +283,10 @@ export const jqCommand: RuntimeCommand = {
       file: string;
       mode: "raw" | "slurp";
     }[] = [];
+    const jsonLimits = {
+      maxDepth: ctx.limits.maxQueryDepth,
+      maxElements: ctx.limits.maxQueryElements,
+    };
 
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
@@ -321,7 +325,7 @@ export const jqCommand: RuntimeCommand = {
         }
         let parsed: unknown[];
         try {
-          parsed = parseJsonStream(json.trim());
+          parsed = parseJsonStream(json.trim(), jsonLimits);
         } catch {
           return jqArgError("invalid JSON text passed to --argjson");
         }
@@ -388,7 +392,7 @@ export const jqCommand: RuntimeCommand = {
       } else if (positionalMode === "jsonargs") {
         let parsed: unknown[];
         try {
-          parsed = parseJsonStream(a.trim());
+          parsed = parseJsonStream(a.trim(), jsonLimits);
         } catch {
           return jqArgError("invalid JSON text passed to --jsonargs");
         }
@@ -422,7 +426,10 @@ export const jqCommand: RuntimeCommand = {
         } else {
           const trimmed = text.trim();
           try {
-            namedArgs.set(name, trimmed ? parseJsonStream(trimmed) : []);
+            namedArgs.set(
+              name,
+              trimmed ? parseJsonStream(trimmed, jsonLimits) : [],
+            );
           } catch {
             return jqArgError("invalid JSON text passed to --slurpfile");
           }
@@ -483,10 +490,6 @@ export const jqCommand: RuntimeCommand = {
         coverage: ctx.coverage,
         requireDefenseContext: ctx.requireDefenseContext,
         budget: { operations: 0, callDepth: 0 },
-      };
-      const jsonLimits = {
-        maxDepth: ctx.limits.maxQueryDepth,
-        maxElements: ctx.limits.maxQueryElements,
       };
       const appendValues = (target: QueryValue[], next: QueryValue[]): void => {
         if (next.length > ctx.limits.maxQueryElements - target.length) {
