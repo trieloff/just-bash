@@ -536,6 +536,7 @@ export class Interpreter {
   private async executeCommand(
     node: CommandNode,
     stdin: string,
+    stdinOwned = false,
   ): Promise<ExecResult> {
     this.assertDefenseContext("command");
 
@@ -556,9 +557,9 @@ export class Interpreter {
       case "Case":
         return executeCase(this.ctx, node);
       case "Subshell":
-        return this.executeSubshell(node, stdin);
+        return this.executeSubshell(node, stdin, stdinOwned);
       case "Group":
-        return this.executeGroup(node, stdin);
+        return this.executeGroup(node, stdin, stdinOwned);
       case "FunctionDef":
         return executeFunctionDef(this.ctx, node);
       case "ArithmeticCommand":
@@ -735,6 +736,12 @@ export class Interpreter {
     // This allows the read builtin to update the FD's position after reading
     let stdinSourceFd = -1;
 
+    // Whether one of the redirections below gave this command its own fd 0.
+    // The content alone cannot say: `cmd < empty-file` produces the same empty
+    // string as no redirection at all, and the two mean opposite things —
+    // EOF versus "inherit the shell's stdin".
+    let stdinRedirected = false;
+
     for (const redir of node.redirections) {
       // Redirections naming a user descriptor were applied to the fd table
       // above; they never contribute to this command's stdin.
@@ -767,6 +774,7 @@ export class Interpreter {
           stdin = content;
           // A later redirection wins: stdin no longer comes from a descriptor.
           stdinSourceFd = -1;
+          stdinRedirected = true;
         }
         continue;
       }
@@ -780,6 +788,7 @@ export class Interpreter {
           ),
         );
         stdinSourceFd = -1;
+        stdinRedirected = true;
         continue;
       }
 
@@ -792,6 +801,7 @@ export class Interpreter {
           // valid bytes into U+FFFD replacement chars.
           stdin = latin1FromBytes(await readBytesFrom(this.ctx.fs, filePath));
           stdinSourceFd = -1;
+          stdinRedirected = true;
         } catch {
           const target = await expandWord(this.ctx, redir.target as WordNode);
           fdScope.restore();
@@ -805,10 +815,12 @@ export class Interpreter {
       // lets the consumer advance N's shared position.
       if (redir.operator === "<&" && redir.target.type === "Word") {
         const target = await expandWord(this.ctx, redir.target as WordNode);
-        // `0<&-` closes stdin for the command.
+        // `0<&-` closes stdin for the command: it owns an empty fd 0, which
+        // is EOF rather than a fall-back to the enclosing shell's stdin.
         if (target === "-") {
           stdin = "";
           stdinSourceFd = -1;
+          stdinRedirected = true;
           continue;
         }
         const sourceFd = Number.parseInt(target.replace(/-$/, ""), 10);
@@ -835,6 +847,9 @@ export class Interpreter {
         }
         stdin = readable.content;
         stdinSourceFd = sourceFd;
+        // The descriptor is this command's fd 0 now — an exhausted one hands
+        // over "" and that means EOF, not "inherit the shell's stdin".
+        stdinRedirected = true;
       }
     }
 
@@ -944,6 +959,7 @@ export class Interpreter {
               false,
               false,
               stdinSourceFd,
+              stdinRedirected,
             );
           } finally {
             // This path never reaches the shared teardown below, so the
@@ -1122,6 +1138,7 @@ export class Interpreter {
         false,
         false,
         stdinSourceFd,
+        stdinRedirected,
       );
     } catch (error) {
       // For break/continue, we still need to apply redirections before propagating
@@ -1247,11 +1264,12 @@ export class Interpreter {
     skipFunctions = false,
     useDefaultPath = false,
     stdinSourceFd = -1,
+    stdinRedirected = false,
   ): Promise<ExecResult> {
     const dispatchCtx: BuiltinDispatchContext = {
       ctx: this.ctx,
-      runCommand: (name, a, qa, s, sf, udp, ssf) =>
-        this.runCommand(name, a, qa, s, sf, udp, ssf),
+      runCommand: (name, a, qa, s, sf, udp, ssf, sr) =>
+        this.runCommand(name, a, qa, s, sf, udp, ssf, sr),
       buildExportedEnv: () => this.buildExportedEnv(),
       executeUserScript: (path, a, s) => this.executeUserScript(path, a, s),
     };
@@ -1266,6 +1284,7 @@ export class Interpreter {
       skipFunctions,
       useDefaultPath,
       stdinSourceFd,
+      stdinRedirected,
     );
 
     if (builtinResult !== null) {
@@ -1300,15 +1319,28 @@ export class Interpreter {
   private async executeSubshell(
     node: SubshellNode,
     stdin = "",
+    stdinOwned = false,
   ): Promise<ExecResult> {
-    return executeSubshellHelper(this.ctx, node, stdin, (stmt) =>
-      this.executeStatement(stmt),
+    return executeSubshellHelper(
+      this.ctx,
+      node,
+      stdin,
+      (stmt) => this.executeStatement(stmt),
+      stdinOwned,
     );
   }
 
-  private async executeGroup(node: GroupNode, stdin = ""): Promise<ExecResult> {
-    return executeGroupHelper(this.ctx, node, stdin, (stmt) =>
-      this.executeStatement(stmt),
+  private async executeGroup(
+    node: GroupNode,
+    stdin = "",
+    stdinOwned = false,
+  ): Promise<ExecResult> {
+    return executeGroupHelper(
+      this.ctx,
+      node,
+      stdin,
+      (stmt) => this.executeStatement(stmt),
+      stdinOwned,
     );
   }
 
