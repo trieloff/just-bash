@@ -47,7 +47,15 @@ import { executeCondition } from "./helpers/condition.js";
 import { getErrorMessage } from "./helpers/errors.js";
 import { handleLoopError } from "./helpers/loop.js";
 import { failure, throwExecutionLimit } from "./helpers/result.js";
-import { applyRedirections, preOpenOutputRedirects } from "./redirections.js";
+import {
+  isNumericFdRedirection,
+  withNumericFds,
+} from "./numeric-fd-redirects.js";
+import {
+  applyRedirections,
+  type ExpandedRedirectTargets,
+  preOpenOutputRedirects,
+} from "./redirections.js";
 import type { InterpreterContext } from "./types.js";
 
 class CompoundOutput {
@@ -141,6 +149,13 @@ export async function executeIf(
   ctx: InterpreterContext,
   node: IfNode,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, () => executeIfBody(ctx, node));
+}
+
+async function executeIfBody(
+  ctx: InterpreterContext,
+  node: IfNode,
+): Promise<ExecResult> {
   const output = new CompoundOutput(ctx);
 
   for (const clause of node.clauses) {
@@ -164,12 +179,23 @@ export async function executeFor(
   ctx: InterpreterContext,
   node: ForNode,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, (fdTargets) =>
+    executeForBody(ctx, node, fdTargets),
+  );
+}
+
+async function executeForBody(
+  ctx: InterpreterContext,
+  node: ForNode,
+  fdTargets: ExpandedRedirectTargets,
+): Promise<ExecResult> {
   // Pre-open output redirects to truncate files BEFORE expanding words
   // This matches bash behavior where redirect files are opened before
   // any command substitutions in the word list are evaluated
   const preparedRedirects = await preOpenOutputRedirects(
     ctx,
     node.redirections,
+    fdTargets,
   );
   if (preparedRedirects.error) {
     return preparedRedirects.error;
@@ -274,12 +300,23 @@ export async function executeCStyleFor(
   ctx: InterpreterContext,
   node: CStyleForNode,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, (fdTargets) =>
+    executeCStyleForBody(ctx, node, fdTargets),
+  );
+}
+
+async function executeCStyleForBody(
+  ctx: InterpreterContext,
+  node: CStyleForNode,
+  fdTargets: ExpandedRedirectTargets,
+): Promise<ExecResult> {
   // Pre-open output redirects to truncate files BEFORE evaluating expressions
   // This matches bash behavior where redirect files are opened before
   // any command substitutions in the loop are evaluated
   const preparedRedirects = await preOpenOutputRedirects(
     ctx,
     node.redirections,
+    fdTargets,
   );
   if (preparedRedirects.error) {
     return preparedRedirects.error;
@@ -382,6 +419,16 @@ export async function executeWhile(
   node: WhileNode,
   stdin = "",
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, () =>
+    executeWhileBody(ctx, node, stdin),
+  );
+}
+
+async function executeWhileBody(
+  ctx: InterpreterContext,
+  node: WhileNode,
+  stdin: string,
+): Promise<ExecResult> {
   const output = new CompoundOutput(ctx);
   let exitCode = 0;
   let iterations = 0;
@@ -389,6 +436,8 @@ export async function executeWhile(
   // Process here-doc redirections to get stdin content
   let effectiveStdin = stdin;
   for (const redir of node.redirections) {
+    // `done 3< file` is a descriptor, not this loop's stdin.
+    if (isNumericFdRedirection(redir)) continue;
     if (
       (redir.operator === "<<" || redir.operator === "<<-") &&
       redir.target.type === "HereDoc"
@@ -516,6 +565,15 @@ export async function executeUntil(
   ctx: InterpreterContext,
   node: UntilNode,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, () =>
+    executeUntilBody(ctx, node),
+  );
+}
+
+async function executeUntilBody(
+  ctx: InterpreterContext,
+  node: UntilNode,
+): Promise<ExecResult> {
   const output = new CompoundOutput(ctx);
   let exitCode = 0;
   let iterations = 0;
@@ -572,12 +630,23 @@ export async function executeCase(
   ctx: InterpreterContext,
   node: CaseNode,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, (fdTargets) =>
+    executeCaseBody(ctx, node, fdTargets),
+  );
+}
+
+async function executeCaseBody(
+  ctx: InterpreterContext,
+  node: CaseNode,
+  fdTargets: ExpandedRedirectTargets,
+): Promise<ExecResult> {
   // Pre-open output redirects to truncate files BEFORE expanding case word
   // This matches bash behavior where redirect files are opened before
   // any command substitutions in the case word are evaluated
   const preparedRedirects = await preOpenOutputRedirects(
     ctx,
     node.redirections,
+    fdTargets,
   );
   if (preparedRedirects.error) {
     return preparedRedirects.error;

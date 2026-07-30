@@ -29,7 +29,12 @@ import { expandWord } from "./expansion.js";
 import { getErrorMessage } from "./helpers/errors.js";
 import { checkFdLimit, failure, result } from "./helpers/result.js";
 import {
+  isNumericFdRedirection,
+  withNumericFds,
+} from "./numeric-fd-redirects.js";
+import {
   applyRedirections,
+  type ExpandedRedirectTargets,
   preOpenOutputRedirects,
   processFdVariableRedirections,
 } from "./redirections.js";
@@ -51,12 +56,25 @@ export async function executeSubshell(
   stdin: string,
   executeStatement: ExecuteStatementFn,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, (fdTargets) =>
+    executeSubshellBody(ctx, node, stdin, executeStatement, fdTargets),
+  );
+}
+
+async function executeSubshellBody(
+  ctx: InterpreterContext,
+  node: SubshellNode,
+  stdin: string,
+  executeStatement: ExecuteStatementFn,
+  fdTargets: ExpandedRedirectTargets,
+): Promise<ExecResult> {
   // Pre-open output redirects to truncate files BEFORE executing body
   // This matches bash behavior where redirect files are opened before
   // any command substitutions in the subshell body are evaluated
   const preparedRedirects = await preOpenOutputRedirects(
     ctx,
     node.redirections,
+    fdTargets,
   );
   if (preparedRedirects.error) {
     return preparedRedirects.error;
@@ -233,12 +251,25 @@ export async function executeGroup(
   stdin: string,
   executeStatement: ExecuteStatementFn,
 ): Promise<ExecResult> {
+  return withNumericFds(ctx, node.redirections, (fdTargets) =>
+    executeGroupBody(ctx, node, stdin, executeStatement, fdTargets),
+  );
+}
+
+async function executeGroupBody(
+  ctx: InterpreterContext,
+  node: GroupNode,
+  stdin: string,
+  executeStatement: ExecuteStatementFn,
+  fdTargets: ExpandedRedirectTargets,
+): Promise<ExecResult> {
   const output = new ExecutionOutputAccumulator(ctx.executionScope, "group");
   let exitCode = 0;
 
   const preparedRedirects = await preOpenOutputRedirects(
     ctx,
     node.redirections,
+    fdTargets,
   );
   if (preparedRedirects.error) return preparedRedirects.error;
 
@@ -255,6 +286,8 @@ export async function executeGroup(
   // Process heredoc and input redirections to get stdin content
   let effectiveStdin = stdin;
   for (const redir of node.redirections) {
+    // `} 3< file` / `} 3<<EOF` are descriptors, handled by the fd table.
+    if (isNumericFdRedirection(redir)) continue;
     if (
       (redir.operator === "<<" || redir.operator === "<<-") &&
       redir.target.type === "HereDoc"

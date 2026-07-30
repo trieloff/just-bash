@@ -20,6 +20,11 @@ import { cloneArray } from "./helpers/array.js";
 import { OK, result, throwExecutionLimit } from "./helpers/result.js";
 import { POSIX_SPECIAL_BUILTINS } from "./helpers/shell-constants.js";
 import {
+  isNumericFdRedirection,
+  type NumericFdScope,
+  openNumericFds,
+} from "./numeric-fd-redirects.js";
+import {
   applyRedirections,
   type ExpandedRedirectTargets,
   preExpandRedirectTargets,
@@ -57,6 +62,8 @@ async function processInputRedirections(
   let stdin = "";
 
   for (const redir of redirections) {
+    // Descriptors named by number never feed the function's stdin.
+    if (isNumericFdRedirection(redir)) continue;
     if (
       (redir.operator === "<<" || redir.operator === "<<-") &&
       redir.target.type === "HereDoc"
@@ -227,12 +234,19 @@ export async function callFunction(
   };
 
   let preExpandedTargets: ExpandedRedirectTargets = new Map();
+  let fdScope: NumericFdScope | null = null;
   try {
+    // Descriptors named by number on the function definition are open for
+    // the duration of each call, like any other compound command.
+    fdScope = await openNumericFds(ctx, func.redirections);
+    if (fdScope.error) return fdScope.error;
+
     // Redirect expansion is part of the function frame and must be protected by
     // the same finally cleanup as body execution.
     const { targets, error: expandError } = await preExpandRedirectTargets(
       ctx,
       func.redirections,
+      fdScope.targets,
     );
     preExpandedTargets = targets;
     if (expandError) return result("", expandError, 1);
@@ -267,6 +281,7 @@ export async function callFunction(
     }
     throw error;
   } finally {
+    fdScope?.restore();
     cleanup();
   }
 }
