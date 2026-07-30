@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   advanceFd,
   closeFd,
+  dupFd,
   FIRST_USER_FD,
   getFdEntry,
   getRawFd,
@@ -187,5 +188,70 @@ describe("fd-table snapshot/restore", () => {
       path: "/tmp/real",
       append: false,
     });
+  });
+});
+
+describe("fd-table shared open file descriptions", () => {
+  const openThree = (ctx: ReturnType<typeof makeCtx>) =>
+    setFdEntry(ctx, 3, { kind: "input", content: "l1\nl2\nl3\n" });
+
+  it("advances every alias when one of them is read", () => {
+    const ctx = makeCtx();
+    openThree(ctx);
+    dupFd(ctx, 4, 3);
+    advanceFd(ctx, 4, 3);
+    expect(readFd(ctx, 3)).toEqual({ content: "l2\nl3\n" });
+    expect(readFd(ctx, 4)).toEqual({ content: "l2\nl3\n" });
+  });
+
+  it("keeps the position on the survivor when an alias is closed", () => {
+    const ctx = makeCtx();
+    openThree(ctx);
+    dupFd(ctx, 4, 3);
+    advanceFd(ctx, 3, 3);
+    closeFd(ctx, 3);
+    expect(readFd(ctx, 4)).toEqual({ content: "l2\nl3\n" });
+  });
+
+  it("shares one description across a chain of duplicates", () => {
+    const ctx = makeCtx();
+    openThree(ctx);
+    dupFd(ctx, 4, 3);
+    dupFd(ctx, 5, 4);
+    advanceFd(ctx, 5, 3);
+    expect(readFd(ctx, 3)).toEqual({ content: "l2\nl3\n" });
+    expect(readFd(ctx, 4)).toEqual({ content: "l2\nl3\n" });
+  });
+
+  it("stops sharing when a descriptor is re-opened", () => {
+    const ctx = makeCtx();
+    openThree(ctx);
+    dupFd(ctx, 4, 3);
+    setFdEntry(ctx, 4, { kind: "input", content: "g1\ng2\n" });
+    advanceFd(ctx, 4, 3);
+    expect(readFd(ctx, 3)).toEqual({ content: "l1\nl2\nl3\n" });
+    expect(readFd(ctx, 4)).toEqual({ content: "g2\n" });
+  });
+
+  it("does not restore the offset a scoped alias moved", () => {
+    const ctx = makeCtx();
+    openThree(ctx);
+    const snapshot = snapshotFds(ctx, [4]);
+    dupFd(ctx, 4, 3);
+    advanceFd(ctx, 4, 3);
+    restoreFds(ctx, snapshot);
+    expect(isFdOpen(ctx, 4)).toBe(false);
+    expect(readFd(ctx, 3)).toEqual({ content: "l2\nl3\n" });
+  });
+
+  it("re-attaches a restored descriptor to a surviving co-member", () => {
+    const ctx = makeCtx();
+    openThree(ctx);
+    dupFd(ctx, 4, 3);
+    const snapshot = snapshotFds(ctx, [4]);
+    setFdEntry(ctx, 4, { kind: "input", content: "g1\n" });
+    restoreFds(ctx, snapshot);
+    advanceFd(ctx, 3, 3);
+    expect(readFd(ctx, 4)).toEqual({ content: "l2\nl3\n" });
   });
 });

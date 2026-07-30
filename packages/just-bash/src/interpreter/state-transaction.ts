@@ -26,6 +26,28 @@ function cloneCompletionSpecs(
     : undefined;
 }
 
+/**
+ * Copy the fd alias groups, preserving the sharing structure: descriptors
+ * that shared one Set in the original must share one Set in the copy, or the
+ * subshell's reads would only move some of the aliases.
+ */
+function cloneFdAliases(
+  aliases: Map<number, Set<number>> | undefined,
+): Map<number, Set<number>> | undefined {
+  if (!aliases) return undefined;
+  const copiedGroups = new Map<Set<number>, Set<number>>();
+  const cloned = new Map<number, Set<number>>();
+  for (const [fd, group] of aliases) {
+    let copy = copiedGroups.get(group);
+    if (!copy) {
+      copy = new Set(group);
+      copiedGroups.set(group, copy);
+    }
+    cloned.set(fd, copy);
+  }
+  return cloned;
+}
+
 function cloneLocalArrayScopes(
   scopes: Map<string, ShellArray | undefined>[] | undefined,
 ): Map<string, ShellArray | undefined>[] | undefined {
@@ -75,6 +97,7 @@ export function beginIsolatedShellState(state: InterpreterState): () => void {
     shoptOptions: state.shoptOptions,
     fileDescriptors: state.fileDescriptors,
     inputFds: state.inputFds,
+    fdAliases: state.fdAliases,
     nextFd: state.nextFd,
     readonlyVars: state.readonlyVars,
     associativeArrays: state.associativeArrays,
@@ -127,6 +150,7 @@ export function beginIsolatedShellState(state: InterpreterState): () => void {
     : undefined;
   // Travels with the descriptor table it classifies.
   state.inputFds = state.inputFds ? new Set(state.inputFds) : undefined;
+  state.fdAliases = cloneFdAliases(state.fdAliases);
   state.readonlyVars = new Set(state.readonlyVars);
   state.associativeArrays = new Set(state.associativeArrays);
   state.namerefs = new Set(state.namerefs);

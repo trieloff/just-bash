@@ -325,6 +325,13 @@ export interface IOState {
    * for one. Maintained exclusively by `fd-table.ts`.
    */
   inputFds?: Set<number>;
+  /**
+   * Descriptors that share one open file description because of `N<&M`, and
+   * therefore share a read offset. Every member of a group maps to the same
+   * Set; descriptors with no aliases have no entry. Maintained exclusively
+   * by `fd-table.ts`.
+   */
+  fdAliases?: Map<number, Set<number>>;
   /** Next available file descriptor for {varname}>file allocation (starts at 10) */
   nextFd?: number;
 }

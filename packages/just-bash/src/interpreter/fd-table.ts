@@ -42,10 +42,14 @@ export type FdEntry =
   | { kind: "dup-out"; sourceFd: number }
   | { kind: "dup-in"; sourceFd: number };
 
-/** A descriptor's raw value plus whether it is known to hold content. */
+/**
+ * A descriptor's raw value, whether it is known to hold content, and which
+ * other descriptors shared its open file description.
+ */
 interface FdSnapshotEntry {
   raw: string | undefined;
   isInput: boolean;
+  aliases: number[];
 }
 
 /** Descriptor state captured by {@link rememberFd}, replayed by
@@ -145,6 +149,46 @@ function markContent(ctx: InterpreterContext, fd: number, isInput: boolean) {
   }
 }
 
+// ---- Shared open file descriptions -----------------------------------------
+// `N<&M` gives N and M the same open file description, so they share ONE read
+// offset: after `exec 4<&3`, reading fd 3 moves fd 4 forward too. The table
+// stores a descriptor's unread remainder as its value, so "sharing an offset"
+// means keeping the aliased descriptors' values in step. `state.fdAliases`
+// records the alias groups; every member maps to the same Set object, and a
+// descriptor with no aliases has no entry at all.
+
+/** The descriptors sharing `fd`'s open file description, `fd` included. */
+function aliasGroup(
+  ctx: InterpreterContext,
+  fd: number,
+): Set<number> | undefined {
+  return ctx.state.fdAliases?.get(fd);
+}
+
+/** Drop `fd` from its alias group; the last remaining member stops aliasing. */
+function leaveAliasGroup(ctx: InterpreterContext, fd: number): void {
+  const group = aliasGroup(ctx, fd);
+  if (!group) return;
+  group.delete(fd);
+  ctx.state.fdAliases?.delete(fd);
+  if (group.size < 2) {
+    for (const member of group) ctx.state.fdAliases?.delete(member);
+  }
+}
+
+/** Put `fd` into `sourceFd`'s alias group, creating the group if needed. */
+function joinAliasGroup(
+  ctx: InterpreterContext,
+  fd: number,
+  sourceFd: number,
+): void {
+  if (fd === sourceFd) return;
+  ctx.state.fdAliases ??= new Map();
+  const group = aliasGroup(ctx, sourceFd) ?? new Set([sourceFd]);
+  group.add(fd);
+  for (const member of group) ctx.state.fdAliases.set(member, group);
+}
+
 /** Raw table value for `fd`, or undefined when the fd is not open. */
 export function getRawFd(
   ctx: InterpreterContext,
@@ -170,17 +214,33 @@ export function isFdOpen(ctx: InterpreterContext, fd: number): boolean {
   return ctx.state.fileDescriptors?.has(fd) === true;
 }
 
-/** Store a raw value, charging the descriptor limit for newly opened fds. */
+/** Write a descriptor's value without disturbing its alias group. */
+function writeRawFd(
+  ctx: InterpreterContext,
+  fd: number,
+  raw: string,
+  isInput: boolean,
+): void {
+  const fds = table(ctx);
+  if (!fds.has(fd)) checkFdLimit(ctx);
+  fds.set(fd, raw);
+  markContent(ctx, fd, isInput);
+}
+
+/**
+ * Store a raw value, charging the descriptor limit for newly opened fds.
+ * Opening a descriptor gives it a NEW open file description, so it stops
+ * sharing an offset with anything it was previously duplicated from —
+ * `exec 4<&3; exec 4< other` leaves fd 3 alone.
+ */
 export function setRawFd(
   ctx: InterpreterContext,
   fd: number,
   raw: string,
   isInput = false,
 ): void {
-  const fds = table(ctx);
-  if (!fds.has(fd)) checkFdLimit(ctx);
-  fds.set(fd, raw);
-  markContent(ctx, fd, isInput);
+  leaveAliasGroup(ctx, fd);
+  writeRawFd(ctx, fd, raw, isInput);
 }
 
 export function setFdEntry(
@@ -194,11 +254,13 @@ export function setFdEntry(
 export function closeFd(ctx: InterpreterContext, fd: number): void {
   ctx.state.fileDescriptors?.delete(fd);
   ctx.state.inputFds?.delete(fd);
+  leaveAliasGroup(ctx, fd);
 }
 
 /**
- * Point `fd` at whatever `sourceFd` refers to, the way `dup2()` does — the
- * raw value and its content/marker classification are copied together.
+ * Point `fd` at whatever `sourceFd` refers to, the way `dup2()` does: the raw
+ * value and its content/marker classification are copied, and the two
+ * descriptors join one alias group so they share a read offset from here on.
  * Returns false when `sourceFd` is not open.
  */
 export function dupFd(
@@ -209,6 +271,7 @@ export function dupFd(
   const raw = getRawFd(ctx, sourceFd);
   if (raw === undefined) return false;
   setRawFd(ctx, fd, raw, ctx.state.inputFds?.has(sourceFd) === true);
+  joinAliasGroup(ctx, fd, sourceFd);
   return true;
 }
 
@@ -239,7 +302,9 @@ export function readFd(
 /**
  * Advance the read position of `fd` by `count` characters.
  * `input` entries keep only the unread remainder, matching bash's single
- * shared file offset: every later read continues where this one stopped.
+ * shared file offset: every later read continues where this one stopped —
+ * including reads through a descriptor duplicated from this one, which
+ * shares the same open file description.
  */
 export function advanceFd(
   ctx: InterpreterContext,
@@ -248,15 +313,21 @@ export function advanceFd(
 ): void {
   const entry = getFdEntry(ctx, fd);
   if (entry === undefined) return;
+  let advanced: FdEntry;
   if (entry.kind === "input") {
-    setFdEntry(ctx, fd, {
-      kind: "input",
-      content: entry.content.slice(count),
-    });
+    advanced = { kind: "input", content: entry.content.slice(count) };
+  } else if (entry.kind === "readwrite") {
+    advanced = { ...entry, position: entry.position + count };
+  } else {
     return;
   }
-  if (entry.kind === "readwrite") {
-    setFdEntry(ctx, fd, { ...entry, position: entry.position + count });
+  const raw = encodeFdEntry(advanced);
+  const isInput = advanced.kind === "input";
+  // The offset lives in the open file description, not the descriptor, so
+  // every alias moves with it. writeRawFd, not setRawFd: this is a read, and
+  // a read must not break the aliasing it is moving.
+  for (const member of aliasGroup(ctx, fd) ?? [fd]) {
+    writeRawFd(ctx, member, raw, isInput);
   }
 }
 
@@ -271,9 +342,11 @@ export function rememberFd(
   fd: number,
 ): void {
   if (snapshot.has(fd)) return;
+  const group = aliasGroup(ctx, fd);
   snapshot.set(fd, {
     raw: getRawFd(ctx, fd),
     isInput: ctx.state.inputFds?.has(fd) === true,
+    aliases: group ? [...group].filter((member) => member !== fd) : [],
   });
 }
 
@@ -290,20 +363,29 @@ export function snapshotFds(
   return snapshot;
 }
 
-/** Undo the descriptor changes recorded by {@link rememberFd}. */
+/**
+ * Undo the descriptor changes recorded by {@link rememberFd}.
+ *
+ * Only the descriptor is restored, never the file offset behind it: a
+ * command that read through `4<&3` has moved the shared description, and
+ * bash leaves fd 3 where that read left it once fd 4 is taken back down.
+ */
 export function restoreFds(
   ctx: InterpreterContext,
   snapshot: FdSnapshot,
 ): void {
   const fds = ctx.state.fileDescriptors;
   if (!fds) return;
-  for (const [fd, { raw, isInput }] of snapshot) {
+  for (const [fd, { raw, isInput, aliases }] of snapshot) {
     if (raw === undefined) {
-      fds.delete(fd);
-      ctx.state.inputFds?.delete(fd);
-    } else {
-      fds.set(fd, raw);
-      markContent(ctx, fd, isInput);
+      closeFd(ctx, fd);
+      continue;
     }
+    // Re-opening the saved value detaches fd from whatever it aliases now.
+    setRawFd(ctx, fd, raw, isInput);
+    // Then re-attach it to whichever of its original co-members is still
+    // open — they all share one description, so any survivor will do.
+    const survivor = aliases.find((member) => fds.has(member));
+    if (survivor !== undefined) joinAliasGroup(ctx, fd, survivor);
   }
 }
