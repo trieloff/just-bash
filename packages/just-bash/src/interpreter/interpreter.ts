@@ -547,7 +547,7 @@ export class Interpreter {
       case "While":
         return executeWhile(this.ctx, node, stdin);
       case "Until":
-        return executeUntil(this.ctx, node);
+        return executeUntil(this.ctx, node, stdin);
       case "Case":
         return executeCase(this.ctx, node);
       case "Subshell":

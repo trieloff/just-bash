@@ -17,6 +17,7 @@ import type {
   ForNode,
   HereDocNode,
   IfNode,
+  RedirectionNode,
   StatementNode,
   UntilNode,
   WhileNode,
@@ -47,8 +48,138 @@ import { executeCondition } from "./helpers/condition.js";
 import { getErrorMessage } from "./helpers/errors.js";
 import { handleLoopError } from "./helpers/loop.js";
 import { failure, throwExecutionLimit } from "./helpers/result.js";
-import { applyRedirections, preOpenOutputRedirects } from "./redirections.js";
+import {
+  applyRedirections,
+  type ExpandedRedirectTargets,
+  preOpenOutputRedirects,
+} from "./redirections.js";
 import type { InterpreterContext } from "./types.js";
+
+/**
+ * Redirection operators a `while`/`until` loop consumes itself to seed the
+ * stdin its body and condition read from. Everything else on the loop is an
+ * ordinary compound-command redirection handled by preOpen/applyRedirections.
+ */
+const LOOP_STDIN_OPERATORS: ReadonlySet<string> = new Set([
+  "<",
+  "<<",
+  "<<-",
+  "<<<",
+]);
+
+type LoopRedirectPrep =
+  | { error: ExecResult }
+  | {
+      /**
+       * stdin supplied by the loop's OWN input redirections, or undefined when
+       * the loop has none. Distinguishing "no input redirection" from "an input
+       * redirection that produced an empty stream" matters: the first inherits
+       * the enclosing read stream, the second replaces it with an empty one.
+       */
+      ownStdin: string | undefined;
+      redirections: RedirectionNode[];
+      targets: ExpandedRedirectTargets;
+    };
+
+/**
+ * Prepare the loop-level redirections of a `while`/`until` loop.
+ *
+ * Bash installs a loop's redirections once, before the loop starts, and keeps
+ * them in effect for the condition and every iteration. That happens in two
+ * steps here:
+ *
+ * 1. Input redirections (`< file`, here-docs, here-strings) are consumed to
+ *    produce the stdin the loop body reads from — this is what makes
+ *    `while read line; do ...; done < file` work.
+ * 2. Every other redirection is treated exactly like the redirections on a
+ *    `for`/`case` compound command: pre-opened now (so `>` truncates its
+ *    target before the condition can read it) and applied to the loop's
+ *    collected output once the loop finishes.
+ *
+ * Input redirections are deliberately kept out of the pre-open/apply list.
+ * They are already fully consumed here, and routing them through
+ * `preOpenOutputRedirects` would expand their targets a second time — with
+ * here-string globbing semantics that bash does not apply to `<<<`.
+ */
+async function prepareLoopRedirections(
+  ctx: InterpreterContext,
+  redirections: RedirectionNode[],
+): Promise<LoopRedirectPrep> {
+  let ownStdin: string | undefined;
+
+  for (const redir of redirections) {
+    if (
+      (redir.operator === "<<" || redir.operator === "<<-") &&
+      redir.target.type === "HereDoc"
+    ) {
+      const hereDoc = redir.target as HereDocNode;
+      let content = await expandWord(ctx, hereDoc.content);
+      if (hereDoc.stripTabs) {
+        content = content
+          .split("\n")
+          .map((line) => line.replace(/^\t+/, ""))
+          .join("\n");
+      }
+      ownStdin = content;
+    } else if (redir.operator === "<<<" && redir.target.type === "Word") {
+      ownStdin = `${await expandWord(ctx, redir.target as WordNode)}\n`;
+    } else if (redir.operator === "<" && redir.target.type === "Word") {
+      const target = await expandWord(ctx, redir.target as WordNode);
+      try {
+        const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
+        ownStdin = await ctx.fs.readFile(filePath);
+      } catch {
+        // A failed input redirection aborts the loop before any output
+        // redirection is opened, so a later `> file` is left untouched.
+        return {
+          error: failure(`bash: ${target}: No such file or directory\n`),
+        };
+      }
+    }
+  }
+
+  const outputRedirections = redirections.filter(
+    (redir) => !LOOP_STDIN_OPERATORS.has(redir.operator),
+  );
+  const prepared = await preOpenOutputRedirects(ctx, outputRedirections);
+  if (prepared.error) {
+    return { error: prepared.error };
+  }
+
+  return {
+    ownStdin,
+    redirections: outputRedirections,
+    targets: prepared.targets,
+  };
+}
+
+/**
+ * Decide whether a loop takes ownership of the shared read stream
+ * (`ctx.state.groupStdin`).
+ *
+ * A loop only installs — and therefore only restores — a stdin it brought
+ * itself: its own input redirection (`< file`, here-doc, here-string), or the
+ * stdin handed to it as a pipeline stage. A stream merely INHERITED from an
+ * enclosing group or loop must be left in place, because reads inside the body
+ * advance it and restoring it afterwards would rewind the shared read
+ * position: `printf 'a\nb\n' | { while read x; do break; done; read y; }` has
+ * to see `y=b`, not `y=a`.
+ *
+ * `ownStdin` of `""` still counts as ownership — `done < empty-file` gives the
+ * body an empty stream rather than the enclosing one.
+ */
+function resolveLoopStdin(
+  ownStdin: string | undefined,
+  pipelineStdin: string,
+): { owns: true; stdin: string } | { owns: false } {
+  if (ownStdin !== undefined) {
+    return { owns: true, stdin: ownStdin };
+  }
+  if (pipelineStdin !== "") {
+    return { owns: true, stdin: pipelineStdin };
+  }
+  return { owns: false };
+}
 
 class CompoundOutput {
   private stdoutChunks: string[] = [];
@@ -382,44 +513,20 @@ export async function executeWhile(
   node: WhileNode,
   stdin = "",
 ): Promise<ExecResult> {
+  const prepared = await prepareLoopRedirections(ctx, node.redirections);
+  if ("error" in prepared) {
+    return prepared.error;
+  }
+
   const output = new CompoundOutput(ctx);
   let exitCode = 0;
   let iterations = 0;
 
-  // Process here-doc redirections to get stdin content
-  let effectiveStdin = stdin;
-  for (const redir of node.redirections) {
-    if (
-      (redir.operator === "<<" || redir.operator === "<<-") &&
-      redir.target.type === "HereDoc"
-    ) {
-      const hereDoc = redir.target as HereDocNode;
-      let content = await expandWord(ctx, hereDoc.content);
-      if (hereDoc.stripTabs) {
-        content = content
-          .split("\n")
-          .map((line) => line.replace(/^\t+/, ""))
-          .join("\n");
-      }
-      effectiveStdin = content;
-    } else if (redir.operator === "<<<" && redir.target.type === "Word") {
-      effectiveStdin = `${await expandWord(ctx, redir.target as WordNode)}\n`;
-    } else if (redir.operator === "<" && redir.target.type === "Word") {
-      try {
-        const target = await expandWord(ctx, redir.target as WordNode);
-        const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
-        effectiveStdin = await ctx.fs.readFile(filePath);
-      } catch {
-        const target = await expandWord(ctx, redir.target as WordNode);
-        return failure(`bash: ${target}: No such file or directory\n`);
-      }
-    }
-  }
-
-  // Save and set groupStdin for piped while loops
+  // Install groupStdin only for a stream this loop owns (see resolveLoopStdin)
+  const loopStdin = resolveLoopStdin(prepared.ownStdin, stdin);
   const savedGroupStdin = ctx.state.groupStdin;
-  if (effectiveStdin) {
-    ctx.state.groupStdin = effectiveStdin;
+  if (loopStdin.owns) {
+    ctx.state.groupStdin = loopStdin.stdin;
   }
 
   ctx.state.loopDepth++;
@@ -499,26 +606,53 @@ export async function executeWhile(
         if (loopResult.action === "break") break;
         if (loopResult.action === "continue") continue;
         if (loopResult.action === "error") {
-          return output.build(loopResult.exitCode ?? 1);
+          // Apply output redirections before returning
+          return applyRedirections(
+            ctx,
+            output.build(loopResult.exitCode ?? 1),
+            prepared.redirections,
+            prepared.targets,
+          );
         }
         throw loopResult.error;
       }
     }
   } finally {
     ctx.state.loopDepth--;
-    ctx.state.groupStdin = savedGroupStdin;
+    if (loopStdin.owns) {
+      ctx.state.groupStdin = savedGroupStdin;
+    }
   }
 
-  return output.build(exitCode);
+  // Apply output redirections
+  return applyRedirections(
+    ctx,
+    output.build(exitCode),
+    prepared.redirections,
+    prepared.targets,
+  );
 }
 
 export async function executeUntil(
   ctx: InterpreterContext,
   node: UntilNode,
+  stdin = "",
 ): Promise<ExecResult> {
+  const prepared = await prepareLoopRedirections(ctx, node.redirections);
+  if ("error" in prepared) {
+    return prepared.error;
+  }
+
   const output = new CompoundOutput(ctx);
   let exitCode = 0;
   let iterations = 0;
+
+  // Install groupStdin only for a stream this loop owns (see resolveLoopStdin)
+  const loopStdin = resolveLoopStdin(prepared.ownStdin, stdin);
+  const savedGroupStdin = ctx.state.groupStdin;
+  if (loopStdin.owns) {
+    ctx.state.groupStdin = loopStdin.stdin;
+  }
 
   ctx.state.loopDepth++;
   try {
@@ -556,16 +690,31 @@ export async function executeUntil(
         if (loopResult.action === "break") break;
         if (loopResult.action === "continue") continue;
         if (loopResult.action === "error") {
-          return output.build(loopResult.exitCode ?? 1);
+          // Apply output redirections before returning
+          return applyRedirections(
+            ctx,
+            output.build(loopResult.exitCode ?? 1),
+            prepared.redirections,
+            prepared.targets,
+          );
         }
         throw loopResult.error;
       }
     }
   } finally {
     ctx.state.loopDepth--;
+    if (loopStdin.owns) {
+      ctx.state.groupStdin = savedGroupStdin;
+    }
   }
 
-  return output.build(exitCode);
+  // Apply output redirections
+  return applyRedirections(
+    ctx,
+    output.build(exitCode),
+    prepared.redirections,
+    prepared.targets,
+  );
 }
 
 export async function executeCase(
