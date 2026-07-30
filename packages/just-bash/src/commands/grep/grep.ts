@@ -179,7 +179,12 @@ export const grepCommand: RuntimeCommand = {
     const includePatterns: string[] = [];
     const excludePatterns: string[] = [];
     const excludeDirPatterns: string[] = [];
-    let pattern: string | null = null;
+    /**
+     * PATTERNS operands given via -e, in argument order. GNU grep accumulates
+     * repeated -e rather than letting the last one win, and each operand may
+     * itself be a newline-separated list.
+     */
+    const exprPatterns: string[] = [];
     /** Paths given to -f/--file, in argument order. "-" means stdin. */
     const patternFiles: string[] = [];
     const operands: string[] = [];
@@ -200,7 +205,7 @@ export const grepCommand: RuntimeCommand = {
 
       if (parseOptions && arg.startsWith("-") && arg !== "-") {
         if (arg === "-e" && i + 1 < args.length) {
-          pattern = args[++i];
+          exprPatterns.push(args[++i]);
           continue;
         }
 
@@ -333,22 +338,32 @@ export const grepCommand: RuntimeCommand = {
     }
 
     // The first operand is the pattern only when no -e/-f pattern was given.
-    if (pattern === null && patternFiles.length === 0) {
-      pattern = operands.shift() ?? null;
-      if (pattern === null) {
+    if (exprPatterns.length === 0 && patternFiles.length === 0) {
+      const positionalPattern = operands.shift();
+      if (positionalPattern === undefined) {
         return {
           stdout: "",
           stderr: "grep: missing pattern\n",
           exitCode: 2,
         };
       }
+      exprPatterns.push(positionalPattern);
     }
     const files = operands;
 
-    // Collect patterns: -e/positional first, then each -f file in order.
-    // All of them OR-combine, exactly like GNU grep.
-    const patterns: string[] =
-      pattern === null ? [] : splitPatternOperand(pattern);
+    // Collect patterns: every -e (and the positional operand) in argument
+    // order, then each -f file in order. All of them OR-combine, exactly like
+    // GNU grep.
+    const patterns: string[] = [];
+    for (const operand of exprPatterns) {
+      patterns.push(...splitPatternOperand(operand));
+    }
+    if (patterns.length > ctx.limits.maxArrayElements) {
+      throw new ExecutionLimitError(
+        `grep: array element limit exceeded (${ctx.limits.maxArrayElements})`,
+        "array_elements",
+      );
+    }
     /** True once `-f -` has drained stdin, so it can't also be searched. */
     let stdinUsedForPatterns = false;
     for (const patternFile of patternFiles) {
