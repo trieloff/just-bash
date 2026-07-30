@@ -12,6 +12,14 @@ import {
  * Covers the input side (`N< file`, `read -u N`, `read <&N`, `done N< file`),
  * the output side (`N> file`, `N>> file`, `>&N`) and descriptor lifetime
  * (`exec` persistence vs. command scoping, `N<&-`).
+ *
+ * Three fixtures are marked `"locked": true` — the ones whose recorded bash
+ * run writes a diagnostic to stderr ("Bad file descriptor" for descriptors 9
+ * and 5, "No such file or directory" for `exec 3< missing.txt`). Only the
+ * argv0 and `line N:` prefix of those messages differs between bash 3.2 and
+ * bash 5.x, but re-recording on another platform would rewrite the fixture
+ * file and fail the workflow's no-diff check. The compared fields (stdout
+ * and exit code) are identical across versions.
  */
 describe("numeric file descriptors - Real Bash Comparison", () => {
   let testDir: string;

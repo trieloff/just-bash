@@ -3,6 +3,7 @@ import {
   advanceFd,
   closeFd,
   decodeFdEntry,
+  dupFd,
   encodeFdEntry,
   type FdEntry,
   FIRST_USER_FD,
@@ -202,6 +203,68 @@ describe("fd-table reading", () => {
   });
 });
 
+describe("fd-table content vs. marker classification", () => {
+  it("never re-parses content that looks like a marker", () => {
+    const ctx = makeCtx();
+    setFdEntry(ctx, 3, { kind: "input", content: "__file__:/tmp/pwn\n" });
+    expect(getFdEntry(ctx, 3)).toEqual({
+      kind: "input",
+      content: "__file__:/tmp/pwn\n",
+    });
+    expect(readFd(ctx, 3)).toEqual({ content: "__file__:/tmp/pwn\n" });
+  });
+
+  it("still decodes a marker written by a non-fd-table code path", () => {
+    const ctx = makeCtx();
+    // No setFdEntry, so nothing classified this descriptor.
+    ctx.state.fileDescriptors?.set(3, "__file__:/tmp/out");
+    expect(getFdEntry(ctx, 3)).toEqual({
+      kind: "output",
+      path: "/tmp/out",
+      append: false,
+    });
+  });
+
+  it("clears the classification when the descriptor is reused for output", () => {
+    const ctx = makeCtx();
+    setFdEntry(ctx, 3, { kind: "input", content: "__dupout__:1" });
+    setFdEntry(ctx, 3, { kind: "output", path: "/tmp/o", append: false });
+    expect(getFdEntry(ctx, 3)).toEqual({
+      kind: "output",
+      path: "/tmp/o",
+      append: false,
+    });
+  });
+
+  it("clears the classification when the descriptor is closed", () => {
+    const ctx = makeCtx();
+    setFdEntry(ctx, 3, { kind: "input", content: "__file__:/tmp/pwn" });
+    closeFd(ctx, 3);
+    ctx.state.fileDescriptors?.set(3, "__file__:/tmp/real");
+    expect(getFdEntry(ctx, 3)).toEqual({
+      kind: "output",
+      path: "/tmp/real",
+      append: false,
+    });
+  });
+
+  it("carries the classification through a duplication", () => {
+    const ctx = makeCtx();
+    setFdEntry(ctx, 3, { kind: "input", content: "__file__:/tmp/pwn" });
+    expect(dupFd(ctx, 4, 3)).toBe(true);
+    expect(getFdEntry(ctx, 4)).toEqual({
+      kind: "input",
+      content: "__file__:/tmp/pwn",
+    });
+  });
+
+  it("reports a failed duplication of an unopened descriptor", () => {
+    const ctx = makeCtx();
+    expect(dupFd(ctx, 4, 3)).toBe(false);
+    expect(isFdOpen(ctx, 4)).toBe(false);
+  });
+});
+
 describe("fd-table snapshot/restore", () => {
   it("restores a descriptor's previous content, including its position", () => {
     const ctx = makeCtx();
@@ -228,6 +291,33 @@ describe("fd-table snapshot/restore", () => {
     setFdEntry(ctx, 3, { kind: "input", content: "first" });
     const snapshot = snapshotFds(ctx, [3, 3]);
     expect(snapshot.size).toBe(1);
-    expect(snapshot.get(3)).toBe("first");
+    setFdEntry(ctx, 3, { kind: "input", content: "second" });
+    restoreFds(ctx, snapshot);
+    expect(readFd(ctx, 3)).toEqual({ content: "first" });
+  });
+
+  it("restores the content classification, not just the raw value", () => {
+    const ctx = makeCtx();
+    setFdEntry(ctx, 3, { kind: "input", content: "__file__:/tmp/pwn" });
+    const snapshot = snapshotFds(ctx, [3]);
+    setFdEntry(ctx, 3, { kind: "output", path: "/tmp/o", append: false });
+    restoreFds(ctx, snapshot);
+    expect(getFdEntry(ctx, 3)).toEqual({
+      kind: "input",
+      content: "__file__:/tmp/pwn",
+    });
+  });
+
+  it("leaves no classification behind for a descriptor it closes", () => {
+    const ctx = makeCtx();
+    const snapshot = snapshotFds(ctx, [3]);
+    setFdEntry(ctx, 3, { kind: "input", content: "__file__:/tmp/pwn" });
+    restoreFds(ctx, snapshot);
+    ctx.state.fileDescriptors?.set(3, "__file__:/tmp/real");
+    expect(getFdEntry(ctx, 3)).toEqual({
+      kind: "output",
+      path: "/tmp/real",
+      append: false,
+    });
   });
 });

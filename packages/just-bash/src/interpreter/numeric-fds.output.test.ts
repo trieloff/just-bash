@@ -170,7 +170,10 @@ describe("numeric output file descriptors", () => {
     const result = await env.exec(
       "exec 3>/tmp/a; exec 4>/tmp/b; exec 5>/tmp/c; exec 6>/tmp/d",
     );
-    expect(result.exitCode).not.toBe(0);
-    expect(result.stderr).toContain("too many open file descriptors (max 3)");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "bash: too many open file descriptors (max 3)\n",
+    );
+    expect(result.exitCode).toBe(126);
   });
 });

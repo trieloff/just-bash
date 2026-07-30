@@ -189,6 +189,72 @@ describe("numeric fd scoping", () => {
     expect(result.exitCode).toBe(0);
   });
 
+  // A command word that expands to nothing takes an early exit out of the
+  // simple-command path; its descriptors still have to come back down.
+  describe("empty command name", () => {
+    it("closes the descriptor when the first argument becomes the command", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        [
+          THREE_LINES,
+          "x=''; $x true 3< /tmp/f.txt",
+          'read -u 3 v; echo "rc=$? v=$v"',
+        ].join("\n"),
+      );
+      expect(result.stdout).toBe("rc=1 v=\n");
+      expect(result.stderr).toBe(
+        "bash: read: 3: invalid file descriptor: Bad file descriptor\n",
+      );
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("closes the descriptor when the command expands to nothing at all", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        [
+          THREE_LINES,
+          "y=''; $y 3< /tmp/f.txt",
+          'read -u 3 w; echo "rc=$? w=$w"',
+        ].join("\n"),
+      );
+      expect(result.stdout).toBe("rc=1 w=\n");
+      expect(result.stderr).toBe(
+        "bash: read: 3: invalid file descriptor: Bad file descriptor\n",
+      );
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("closes the descriptor for a literal empty command name", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        [
+          THREE_LINES,
+          "'' 3< /tmp/f.txt",
+          'echo "cmd rc=$?"',
+          'read -u 3 z; echo "rc=$? z=$z"',
+        ].join("\n"),
+      );
+      expect(result.stdout).toBe("cmd rc=127\nrc=1 z=\n");
+      expect(result.stderr).toBe(
+        "bash: : command not found\n" +
+          "bash: read: 3: invalid file descriptor: Bad file descriptor\n",
+      );
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("closes an output descriptor opened on the empty-name path", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        ["q=''; $q true 4> /tmp/o5.txt", 'echo hi >&4; echo "rc=$?"'].join(
+          "\n",
+        ),
+      );
+      expect(result.stdout).toBe("rc=1\n");
+      expect(result.stderr).toBe("bash: 4: Bad file descriptor\n");
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
   it("survives a break out of the loop body", async () => {
     const env = new Bash();
     const result = await env.exec(

@@ -19,7 +19,8 @@
     },
     "stdout": "rc=1\n",
     "stderr": "/bin/bash: 9: Bad file descriptor\n",
-    "exitCode": 0
+    "exitCode": 0,
+    "locked": true
   },
   "343646c6dfbd377b": {
     "command": "{ read -u 3 a; read -u 3 b; echo \"a=$a b=$b\"; } 3< three.txt",
@@ -118,7 +119,8 @@
     },
     "stdout": "rc=1\nstill-running\n",
     "stderr": "/bin/bash: missing.txt: No such file or directory\n",
-    "exitCode": 0
+    "exitCode": 0,
+    "locked": true
   },
   "a7cfd8549b4c466f": {
     "command": "read -u 3 x 3< three.txt; echo \"x=$x\"; read -u 3 y 2>/dev/null; echo \"rc=$? y=$y\"",
@@ -173,7 +175,8 @@
     },
     "stdout": "rc=1\nhello\n",
     "stderr": "/bin/bash: 5: Bad file descriptor\n",
-    "exitCode": 0
+    "exitCode": 0,
+    "locked": true
   },
   "d5a5dbadf3afb74d": {
     "command": "echo direct 5> five.txt >&5; echo \"rc=$?\"; cat five.txt",
