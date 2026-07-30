@@ -531,6 +531,7 @@ export class Interpreter {
   private async executeCommand(
     node: CommandNode,
     stdin: string,
+    stdinOwned = false,
   ): Promise<ExecResult> {
     this.assertDefenseContext("command");
 
@@ -551,9 +552,9 @@ export class Interpreter {
       case "Case":
         return executeCase(this.ctx, node);
       case "Subshell":
-        return this.executeSubshell(node, stdin);
+        return this.executeSubshell(node, stdin, stdinOwned);
       case "Group":
-        return this.executeGroup(node, stdin);
+        return this.executeGroup(node, stdin, stdinOwned);
       case "FunctionDef":
         return executeFunctionDef(this.ctx, node);
       case "ArithmeticCommand":
@@ -710,6 +711,12 @@ export class Interpreter {
     // This allows the read builtin to update the FD's position after reading
     let stdinSourceFd = -1;
 
+    // Whether one of the redirections below gave this command its own fd 0.
+    // The content alone cannot say: `cmd < empty-file` produces the same empty
+    // string as no redirection at all, and the two mean opposite things —
+    // EOF versus "inherit the shell's stdin".
+    let stdinRedirected = false;
+
     for (const redir of node.redirections) {
       if (
         (redir.operator === "<<" || redir.operator === "<<-") &&
@@ -740,6 +747,7 @@ export class Interpreter {
           this.ctx.state.fileDescriptors.set(fd, content);
         } else {
           stdin = content;
+          stdinRedirected = true;
         }
         continue;
       }
@@ -752,6 +760,7 @@ export class Interpreter {
             `${await expandWord(this.ctx, redir.target as WordNode)}\n`,
           ),
         );
+        stdinRedirected = true;
         continue;
       }
 
@@ -763,6 +772,7 @@ export class Interpreter {
           // pipe and we don't want the smart-utf8 read path turning
           // valid bytes into U+FFFD replacement chars.
           stdin = latin1FromBytes(await readBytesFrom(this.ctx.fs, filePath));
+          stdinRedirected = true;
         } catch {
           const target = await expandWord(this.ctx, redir.target as WordNode);
           for (const [name, value] of tempAssignments) {
@@ -788,6 +798,7 @@ export class Interpreter {
                 // Return content starting from current position
                 stdin = parsed.content.slice(parsed.position);
                 stdinSourceFd = sourceFd;
+                stdinRedirected = true;
               }
             } else if (
               fdContent.startsWith("__file__:") ||
@@ -797,6 +808,7 @@ export class Interpreter {
             } else {
               // Plain content (from exec N< file or here-docs)
               stdin = fdContent;
+              stdinRedirected = true;
             }
           }
         }
@@ -908,6 +920,7 @@ export class Interpreter {
             false,
             false,
             stdinSourceFd,
+            stdinRedirected,
           );
         }
         // No args - treat as no-op (status 0)
@@ -1131,6 +1144,7 @@ export class Interpreter {
         false,
         false,
         stdinSourceFd,
+        stdinRedirected,
       );
     } catch (error) {
       // For break/continue, we still need to apply redirections before propagating
@@ -1239,11 +1253,12 @@ export class Interpreter {
     skipFunctions = false,
     useDefaultPath = false,
     stdinSourceFd = -1,
+    stdinRedirected = false,
   ): Promise<ExecResult> {
     const dispatchCtx: BuiltinDispatchContext = {
       ctx: this.ctx,
-      runCommand: (name, a, qa, s, sf, udp, ssf) =>
-        this.runCommand(name, a, qa, s, sf, udp, ssf),
+      runCommand: (name, a, qa, s, sf, udp, ssf, sr) =>
+        this.runCommand(name, a, qa, s, sf, udp, ssf, sr),
       buildExportedEnv: () => this.buildExportedEnv(),
       executeUserScript: (path, a, s) => this.executeUserScript(path, a, s),
     };
@@ -1258,6 +1273,7 @@ export class Interpreter {
       skipFunctions,
       useDefaultPath,
       stdinSourceFd,
+      stdinRedirected,
     );
 
     if (builtinResult !== null) {
@@ -1292,15 +1308,28 @@ export class Interpreter {
   private async executeSubshell(
     node: SubshellNode,
     stdin = "",
+    stdinOwned = false,
   ): Promise<ExecResult> {
-    return executeSubshellHelper(this.ctx, node, stdin, (stmt) =>
-      this.executeStatement(stmt),
+    return executeSubshellHelper(
+      this.ctx,
+      node,
+      stdin,
+      (stmt) => this.executeStatement(stmt),
+      stdinOwned,
     );
   }
 
-  private async executeGroup(node: GroupNode, stdin = ""): Promise<ExecResult> {
-    return executeGroupHelper(this.ctx, node, stdin, (stmt) =>
-      this.executeStatement(stmt),
+  private async executeGroup(
+    node: GroupNode,
+    stdin = "",
+    stdinOwned = false,
+  ): Promise<ExecResult> {
+    return executeGroupHelper(
+      this.ctx,
+      node,
+      stdin,
+      (stmt) => this.executeStatement(stmt),
+      stdinOwned,
     );
   }
 

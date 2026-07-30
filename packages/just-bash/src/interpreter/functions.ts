@@ -49,12 +49,17 @@ export function executeFunctionDef(
 /**
  * Process input redirections to get stdin content for function calls.
  * Handles heredocs (<<, <<-), here-strings (<<<), and file input (<).
+ *
+ * `redirected` is reported separately from the content: `f() { …; } < empty`
+ * yields the same empty string as a definition with no redirection, but it
+ * means EOF inside the function rather than "inherit the shell's stdin".
  */
 async function processInputRedirections(
   ctx: InterpreterContext,
   redirections: RedirectionNode[],
-): Promise<string> {
+): Promise<{ stdin: string; redirected: boolean }> {
   let stdin = "";
+  let redirected = false;
 
   for (const redir of redirections) {
     if (
@@ -74,21 +79,24 @@ async function processInputRedirections(
       const fd = redir.fd ?? 0;
       if (fd === 0) {
         stdin = content;
+        redirected = true;
       }
     } else if (redir.operator === "<<<" && redir.target.type === "Word") {
       stdin = `${await expandWord(ctx, redir.target as WordNode)}\n`;
+      redirected = true;
     } else if (redir.operator === "<" && redir.target.type === "Word") {
       const target = await expandWord(ctx, redir.target as WordNode);
       const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
       try {
         stdin = await ctx.fs.readFile(filePath);
+        redirected = true;
       } catch {
         // File not found - stdin remains unchanged
       }
     }
   }
 
-  return stdin;
+  return { stdin, redirected };
 }
 
 export async function callFunction(
@@ -97,6 +105,8 @@ export async function callFunction(
   args: string[],
   stdin = "",
   callLine?: number,
+  /** A redirection on the call site (`f < file`) gave the function its own fd 0. */
+  stdinRedirected = false,
 ): Promise<ExecResult> {
   ctx.state.callDepth++;
   if (ctx.state.callDepth > ctx.limits.maxCallDepth) {
@@ -243,8 +253,18 @@ export async function callFunction(
       ctx,
       func.redirections,
     );
-    const effectiveStdin = stdin || redirectionStdin;
-    const execResult = await ctx.executeCommand(func.body, effectiveStdin);
+    const effectiveStdin = stdin || redirectionStdin.stdin;
+    // The body owns fd 0 when anything gave the function one: a pipe or a
+    // redirection on the call (`f < file`), or one on the definition
+    // (`f() { …; } < file`). Empty content is still ownership — it means EOF,
+    // not "read the enclosing shell's stdin".
+    const stdinOwned =
+      stdinRedirected || redirectionStdin.redirected || stdin !== "";
+    const execResult = await ctx.executeCommand(
+      func.body,
+      effectiveStdin,
+      stdinOwned,
+    );
     // Apply output redirections from the function definition using pre-expanded targets
     // e.g., fun() { echo hi; } 1>&2 should redirect output to stderr when called
     return applyRedirections(

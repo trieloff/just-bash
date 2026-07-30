@@ -50,6 +50,8 @@ export async function executeSubshell(
   node: SubshellNode,
   stdin: string,
   executeStatement: ExecuteStatementFn,
+  /** See `executeGroup`: empty content can still be an owned, empty fd 0. */
+  stdinOwned = false,
 ): Promise<ExecResult> {
   // Pre-open output redirects to truncate files BEFORE executing body
   // This matches bash behavior where redirect files are opened before
@@ -72,7 +74,7 @@ export async function executeSubshell(
   ctx.state.bashPid = ctx.state.nextVirtualPid++;
 
   // Save any existing groupStdin and set new one from pipeline
-  if (stdin) {
+  if (stdinOwned || stdin) {
     ctx.state.groupStdin = stdin;
   }
 
@@ -232,6 +234,12 @@ export async function executeGroup(
   node: GroupNode,
   stdin: string,
   executeStatement: ExecuteStatementFn,
+  /**
+   * The caller already gave this group its own fd 0 — a function body whose
+   * definition or call was redirected. Needed because an empty `stdin` cannot
+   * say whether it came from `< empty-file` or from no redirection at all.
+   */
+  stdinOwned = false,
 ): Promise<ExecResult> {
   const output = new ExecutionOutputAccumulator(ctx.executionScope, "group");
   let exitCode = 0;
@@ -252,8 +260,13 @@ export async function executeGroup(
     return fdVarError;
   }
 
-  // Process heredoc and input redirections to get stdin content
+  // Process heredoc and input redirections to get stdin content.
+  // `ownsStdin` records whether the group gets its *own* fd 0 — from a
+  // pipeline (`… | { …; }`) or from a redirection on the group itself
+  // (`{ …; } < file`, `<<EOT`, `<<<`). A group without one shares the
+  // enclosing shell's stdin, which decides what has to be restored below.
   let effectiveStdin = stdin;
+  let ownsStdin = stdinOwned || stdin !== "";
   for (const redir of node.redirections) {
     if (
       (redir.operator === "<<" || redir.operator === "<<-") &&
@@ -277,17 +290,20 @@ export async function executeGroup(
         ctx.state.fileDescriptors.set(fd, content);
       } else {
         effectiveStdin = content;
+        ownsStdin = true;
       }
     } else if (redir.operator === "<<<" && redir.target.type === "Word") {
       effectiveStdin = `${
         preparedRedirects.targets.get(node.redirections.indexOf(redir)) ?? ""
       }\n`;
+      ownsStdin = true;
     } else if (redir.operator === "<" && redir.target.type === "Word") {
       try {
         const target =
           preparedRedirects.targets.get(node.redirections.indexOf(redir)) ?? "";
         const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
         effectiveStdin = await ctx.fs.readFile(filePath);
+        ownsStdin = true;
       } catch {
         const target =
           preparedRedirects.targets.get(node.redirections.indexOf(redir)) ?? "";
@@ -296,11 +312,33 @@ export async function executeGroup(
     }
   }
 
-  // Save any existing groupStdin and set new one from pipeline
+  // A group restores only the stdin it actually replaced.
+  //
+  // `{ …; } < file` (or a heredoc/here-string on the group, or a pipe into it)
+  // gives the group its own fd 0, so the enclosing shell's read position has to
+  // come back untouched by whatever the body read.
+  //
+  // A group without one shares the shell's fd 0. Reads inside it move the one
+  // shared position, and `{ { read a; }; read b; }` must therefore give `b` the
+  // *second* line: putting the saved position back would replay a line the
+  // inner group already consumed.
   const savedGroupStdin = ctx.state.groupStdin;
-  if (effectiveStdin) {
+  if (ownsStdin) {
     ctx.state.groupStdin = effectiveStdin;
   }
+  const restoreGroupStdin = (): void => {
+    // A shared stdin can be consumed down to "" but never taken away:
+    // `undefined` means "this scope has no stdin at all", which is not a read
+    // position. If the body left `undefined` where the group inherited a
+    // stream, something inside cleared shared state it does not own (pipeline
+    // stages do on main — see #328) and there is no position to hand back.
+    if (
+      ownsStdin ||
+      (savedGroupStdin !== undefined && ctx.state.groupStdin === undefined)
+    ) {
+      ctx.state.groupStdin = savedGroupStdin;
+    }
+  };
 
   try {
     for (const stmt of node.body) {
@@ -310,7 +348,7 @@ export async function executeGroup(
     }
   } catch (error) {
     // Restore groupStdin before handling error
-    ctx.state.groupStdin = savedGroupStdin;
+    restoreGroupStdin();
     // ExecutionLimitError must always propagate - these are safety limits
     if (error instanceof ExecutionLimitError) {
       output.prependTo(error);
@@ -329,7 +367,7 @@ export async function executeGroup(
   }
 
   // Restore groupStdin
-  ctx.state.groupStdin = savedGroupStdin;
+  restoreGroupStdin();
 
   // Apply output redirections
   const bodyResult = output.build(exitCode);

@@ -443,7 +443,17 @@ export interface InterpreterContext {
   ) => Promise<ExecResult>;
   executeScript: (node: ScriptNode) => Promise<ExecResult>;
   executeStatement: (node: StatementNode) => Promise<ExecResult>;
-  executeCommand: (node: CommandNode, stdin: string) => Promise<ExecResult>;
+  /**
+   * `stdinOwned` says the caller gave this command its own fd 0, even when the
+   * content is the empty string (`f < empty-file`). Without it an empty stdin
+   * is indistinguishable from "no redirection", and the command would fall
+   * back to the enclosing shell's stdin instead of seeing EOF.
+   */
+  executeCommand: (
+    node: CommandNode,
+    stdin: string,
+    stdinOwned?: boolean,
+  ) => Promise<ExecResult>;
   /** Optional secure fetch function for network-enabled commands */
   fetch?: SecureFetch;
   /** Optional sleep function for testing with mock clocks */
