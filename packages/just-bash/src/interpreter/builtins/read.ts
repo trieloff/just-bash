@@ -254,11 +254,16 @@ export function handleRead(
     const readable = readFd(ctx, fileDescriptor);
     if ("error" in readable) {
       // bash distinguishes "you named a descriptor that isn't open" from
-      // "the descriptor is open but not readable".
-      const message =
-        readable.error === "write-only"
-          ? `bash: read: read error: ${fileDescriptor}: Bad file descriptor\n`
-          : `bash: read: ${fileDescriptor}: invalid file descriptor: Bad file descriptor\n`;
+      // "the descriptor is open but not readable". stdout and stderr are
+      // always open and always write-only, so they take the latter even
+      // though they never appear in the descriptor table.
+      const writeOnly =
+        readable.error === "write-only" ||
+        fileDescriptor === 1 ||
+        fileDescriptor === 2;
+      const message = writeOnly
+        ? `bash: read: read error: ${fileDescriptor}: Bad file descriptor\n`
+        : `bash: read: ${fileDescriptor}: invalid file descriptor: Bad file descriptor\n`;
       return result("", message, 1);
     }
     effectiveStdin = readable.content;

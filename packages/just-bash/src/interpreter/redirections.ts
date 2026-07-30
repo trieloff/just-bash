@@ -18,7 +18,14 @@ import {
   expandWord,
   hasQuotedMultiValueAt,
 } from "./expansion.js";
-import { FIRST_USER_FD, getFdEntry } from "./fd-table.js";
+import {
+  closeFd,
+  dupFd,
+  type FdEntry,
+  FIRST_USER_FD,
+  getFdEntry,
+  setFdEntry,
+} from "./fd-table.js";
 import { checkReadonlyError } from "./helpers/readonly.js";
 import { checkFdLimit, result as makeResult } from "./helpers/result.js";
 import { isNumericFdRedirection } from "./numeric-fd-redirects.js";
@@ -197,16 +204,15 @@ export async function processFdVariableRedirections(
       const existingFd = ctx.state.env.get(redir.fdVariable);
       if (existingFd !== undefined) {
         const fdNum = Number.parseInt(existingFd, 10);
-        if (!Number.isNaN(fdNum)) ctx.state.fileDescriptors.delete(fdNum);
+        if (!Number.isNaN(fdNum)) closeFd(ctx, fdNum);
       }
       continue;
     }
 
-    let fdInfo: string | undefined;
+    let fdInfo: FdEntry | undefined;
     if (isFdRedirect) {
       const sourceFd = Number.parseInt(target, 10);
-      if (!Number.isNaN(sourceFd))
-        fdInfo = ctx.state.fileDescriptors.get(sourceFd);
+      if (!Number.isNaN(sourceFd)) fdInfo = getFdEntry(ctx, sourceFd);
     } else if (
       redir.operator === ">" ||
       redir.operator === ">>" ||
@@ -229,13 +235,13 @@ export async function processFdVariableRedirections(
       checkFdLimit(ctx);
       if (append) await ctx.fs.appendFile(filePath, "", "binary");
       else await ctx.fs.writeFile(filePath, "", "binary");
-      fdInfo = `__file__:${filePath}`;
+      fdInfo = { kind: "output", path: filePath, append };
     } else if (redir.operator === "<<<") {
-      fdInfo = `${target}\n`;
+      fdInfo = { kind: "input", content: `${target}\n` };
     } else if (redir.operator === "<" || redir.operator === "<>") {
       try {
         const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
-        fdInfo = await ctx.fs.readFile(filePath);
+        fdInfo = { kind: "input", content: await ctx.fs.readFile(filePath) };
       } catch {
         return makeResult(
           "",
@@ -248,7 +254,7 @@ export async function processFdVariableRedirections(
     checkFdLimit(ctx);
     const fd = allocateFd(ctx);
     ctx.state.env.set(redir.fdVariable, String(fd));
-    if (fdInfo !== undefined) ctx.state.fileDescriptors.set(fd, fdInfo);
+    if (fdInfo !== undefined) setFdEntry(ctx, fd, fdInfo);
   }
 
   return null; // Success
@@ -631,32 +637,17 @@ export async function applyRedirections(
           const sourceFdStr = target.slice(0, -1);
           const sourceFd = Number.parseInt(sourceFdStr, 10);
           if (!Number.isNaN(sourceFd)) {
-            // First, duplicate: copy the FD content/info from source to target
-            const sourceInfo = ctx.state.fileDescriptors?.get(sourceFd);
-            if (sourceInfo !== undefined) {
-              if (!ctx.state.fileDescriptors) {
-                ctx.state.fileDescriptors = new Map();
-              }
-              ctx.state.fileDescriptors.set(fd, sourceInfo);
+            // First, duplicate: point the target at whatever the source is
+            if (dupFd(ctx, fd, sourceFd)) {
               // Then close the source FD (only for user FDs 3+)
-              if (sourceFd >= 3) {
-                ctx.state.fileDescriptors?.delete(sourceFd);
-              }
+              if (sourceFd >= FIRST_USER_FD) closeFd(ctx, sourceFd);
             } else if (sourceFd === 1 || sourceFd === 2) {
-              // Source FD is stdout or stderr which aren't in fileDescriptors
-              // Store as duplication marker
-              if (!ctx.state.fileDescriptors) {
-                ctx.state.fileDescriptors = new Map();
-              }
-              ctx.state.fileDescriptors.set(fd, `__dupout__:${sourceFd}`);
+              // stdout/stderr are not in the table; record which one.
+              setFdEntry(ctx, fd, { kind: "dup-out", sourceFd });
             } else if (sourceFd === 0) {
-              // Source FD is stdin
-              if (!ctx.state.fileDescriptors) {
-                ctx.state.fileDescriptors = new Map();
-              }
-              ctx.state.fileDescriptors.set(fd, `__dupin__:${sourceFd}`);
-            } else if (sourceFd >= 3) {
-              // Source FD is a user FD (3+) that's not in fileDescriptors - bad file descriptor
+              setFdEntry(ctx, fd, { kind: "dup-in", sourceFd });
+            } else if (sourceFd >= FIRST_USER_FD) {
+              // Source FD is a user FD (3+) that isn't open - bad file descriptor
               stderr += `bash: ${sourceFd}: Bad file descriptor\n`;
               exitCode = 1;
             }

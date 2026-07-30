@@ -3,9 +3,8 @@
  *
  * One typed view over `ctx.state.fileDescriptors`, the shell's descriptor
  * table. The table itself stays a `Map<number, string>` because it is part
- * of the public `CommandContext` surface; this module owns the string
- * encoding so that no other file has to know about the `__file__:` /
- * `__rw__:` / `__dupout__:` prefixes.
+ * of the public `CommandContext` surface — extensions read fd values as
+ * content — so this module owns the string encoding instead.
  *
  * Entry kinds:
  * - `input`      readable content (`N< file`, `N<<EOF`, `N<<<word`). Reading
@@ -16,10 +15,12 @@
  * - `dup-out`    fd duplicated from stdout/stderr (`N>&1`).
  * - `dup-in`     fd duplicated from stdin (`N<&0`).
  *
- * Note on ambiguity (pre-existing): an `input` entry is stored verbatim, so
- * content that literally begins with one of the marker prefixes decodes as
- * that other kind. The public API documents fd values as "content", so the
- * encoding is kept as-is rather than re-tagged.
+ * An `input` entry is stored verbatim, so its content can look exactly like
+ * one of the marker encodings (a file whose first line is `__file__:/x`).
+ * `inputFds` records which descriptors hold content, so the markers are
+ * never guessed at for a descriptor this module opened; the prefix sniffing
+ * in {@link decodeFdEntry} is only a fallback for descriptors written by
+ * older code paths.
  */
 
 import { checkFdLimit } from "./helpers/result.js";
@@ -40,6 +41,16 @@ export type FdEntry =
   | { kind: "readwrite"; path: string; position: number; content: string }
   | { kind: "dup-out"; sourceFd: number }
   | { kind: "dup-in"; sourceFd: number };
+
+/** A descriptor's raw value plus whether it is known to hold content. */
+interface FdSnapshotEntry {
+  raw: string | undefined;
+  isInput: boolean;
+}
+
+/** Descriptor state captured by {@link rememberFd}, replayed by
+ * {@link restoreFds}. */
+export type FdSnapshot = Map<number, FdSnapshotEntry>;
 
 /**
  * Parse the content of a read-write file descriptor.
@@ -69,7 +80,11 @@ function parseDupSource(raw: string, prefix: string): number | null {
   return Number.isNaN(sourceFd) ? null : sourceFd;
 }
 
-/** Decode a raw table value into a typed entry. */
+/**
+ * Decode a raw table value into a typed entry.
+ * Callers that know the descriptor holds content should go through
+ * {@link getFdEntry}, which consults `inputFds` first and never guesses.
+ */
 export function decodeFdEntry(raw: string): FdEntry {
   if (raw.startsWith(FILE_PREFIX)) {
     return {
@@ -121,6 +136,15 @@ function table(ctx: InterpreterContext): Map<number, string> {
   return ctx.state.fileDescriptors;
 }
 
+function markContent(ctx: InterpreterContext, fd: number, isInput: boolean) {
+  if (isInput) {
+    ctx.state.inputFds ??= new Set();
+    ctx.state.inputFds.add(fd);
+  } else {
+    ctx.state.inputFds?.delete(fd);
+  }
+}
+
 /** Raw table value for `fd`, or undefined when the fd is not open. */
 export function getRawFd(
   ctx: InterpreterContext,
@@ -135,7 +159,11 @@ export function getFdEntry(
   fd: number,
 ): FdEntry | undefined {
   const raw = getRawFd(ctx, fd);
-  return raw === undefined ? undefined : decodeFdEntry(raw);
+  if (raw === undefined) return undefined;
+  // A descriptor known to hold content is never re-parsed: a file whose
+  // first line reads `__file__:/tmp/x` is data, not a marker.
+  if (ctx.state.inputFds?.has(fd)) return { kind: "input", content: raw };
+  return decodeFdEntry(raw);
 }
 
 export function isFdOpen(ctx: InterpreterContext, fd: number): boolean {
@@ -147,10 +175,12 @@ export function setRawFd(
   ctx: InterpreterContext,
   fd: number,
   raw: string,
+  isInput = false,
 ): void {
   const fds = table(ctx);
   if (!fds.has(fd)) checkFdLimit(ctx);
   fds.set(fd, raw);
+  markContent(ctx, fd, isInput);
 }
 
 export function setFdEntry(
@@ -158,11 +188,28 @@ export function setFdEntry(
   fd: number,
   entry: FdEntry,
 ): void {
-  setRawFd(ctx, fd, encodeFdEntry(entry));
+  setRawFd(ctx, fd, encodeFdEntry(entry), entry.kind === "input");
 }
 
 export function closeFd(ctx: InterpreterContext, fd: number): void {
   ctx.state.fileDescriptors?.delete(fd);
+  ctx.state.inputFds?.delete(fd);
+}
+
+/**
+ * Point `fd` at whatever `sourceFd` refers to, the way `dup2()` does — the
+ * raw value and its content/marker classification are copied together.
+ * Returns false when `sourceFd` is not open.
+ */
+export function dupFd(
+  ctx: InterpreterContext,
+  fd: number,
+  sourceFd: number,
+): boolean {
+  const raw = getRawFd(ctx, sourceFd);
+  if (raw === undefined) return false;
+  setRawFd(ctx, fd, raw, ctx.state.inputFds?.has(sourceFd) === true);
+  return true;
 }
 
 /**
@@ -214,29 +261,49 @@ export function advanceFd(
 }
 
 /**
+ * Record `fd`'s current state into `snapshot`, unless it is already there —
+ * the FIRST value seen is the one a later {@link restoreFds} puts back.
+ * A `raw` of `undefined` records "was not open".
+ */
+export function rememberFd(
+  ctx: InterpreterContext,
+  snapshot: FdSnapshot,
+  fd: number,
+): void {
+  if (snapshot.has(fd)) return;
+  snapshot.set(fd, {
+    raw: getRawFd(ctx, fd),
+    isInput: ctx.state.inputFds?.has(fd) === true,
+  });
+}
+
+/**
  * Snapshot the given descriptors so a scoped redirection can put the table
- * back the way it found it. `undefined` records "was not open".
+ * back the way it found it.
  */
 export function snapshotFds(
   ctx: InterpreterContext,
   fds: Iterable<number>,
-): Map<number, string | undefined> {
-  const snapshot = new Map<number, string | undefined>();
-  for (const fd of fds) {
-    if (!snapshot.has(fd)) snapshot.set(fd, getRawFd(ctx, fd));
-  }
+): FdSnapshot {
+  const snapshot: FdSnapshot = new Map();
+  for (const fd of fds) rememberFd(ctx, snapshot, fd);
   return snapshot;
 }
 
-/** Undo the descriptor changes recorded by {@link snapshotFds}. */
+/** Undo the descriptor changes recorded by {@link rememberFd}. */
 export function restoreFds(
   ctx: InterpreterContext,
-  snapshot: Map<number, string | undefined>,
+  snapshot: FdSnapshot,
 ): void {
   const fds = ctx.state.fileDescriptors;
   if (!fds) return;
-  for (const [fd, raw] of snapshot) {
-    if (raw === undefined) fds.delete(fd);
-    else fds.set(fd, raw);
+  for (const [fd, { raw, isInput }] of snapshot) {
+    if (raw === undefined) {
+      fds.delete(fd);
+      ctx.state.inputFds?.delete(fd);
+    } else {
+      fds.set(fd, raw);
+      markContent(ctx, fd, isInput);
+    }
   }
 }

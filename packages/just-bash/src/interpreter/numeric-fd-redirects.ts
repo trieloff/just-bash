@@ -29,12 +29,13 @@ import {
 } from "./expansion.js";
 import {
   closeFd,
+  dupFd,
   type FdEntry,
+  type FdSnapshot,
   FIRST_USER_FD,
-  getRawFd,
+  rememberFd,
   restoreFds,
   setFdEntry,
-  setRawFd,
 } from "./fd-table.js";
 import { result as makeResult } from "./helpers/result.js";
 import type { ExpandedRedirectTargets } from "./redirections.js";
@@ -107,11 +108,7 @@ function duplicateFd(
   sourceFd: number,
   isInput: boolean,
 ): ExecResult | null {
-  const sourceRaw = getRawFd(ctx, sourceFd);
-  if (sourceRaw !== undefined) {
-    setRawFd(ctx, fd, sourceRaw);
-    return null;
-  }
+  if (dupFd(ctx, fd, sourceFd)) return null;
   if (sourceFd >= FIRST_USER_FD) return badFd(sourceFd);
   // 0/1/2 never live in the table; record which standard stream this is.
   const entry: FdEntry = isInput
@@ -136,7 +133,7 @@ export async function openNumericFds(
   redirections: RedirectionNode[],
 ): Promise<NumericFdScope> {
   const targets: ExpandedRedirectTargets = new Map();
-  const snapshot = new Map<number, string | undefined>();
+  const snapshot: FdSnapshot = new Map();
   let restored = false;
   const restore = (): void => {
     if (restored) return;
@@ -147,9 +144,7 @@ export async function openNumericFds(
 
   if (!redirections.some(isNumericFdRedirection)) return empty;
 
-  const remember = (fd: number): void => {
-    if (!snapshot.has(fd)) snapshot.set(fd, getRawFd(ctx, fd));
-  };
+  const remember = (fd: number): void => rememberFd(ctx, snapshot, fd);
   const fail = (error: ExecResult): NumericFdScope => ({
     error,
     targets,

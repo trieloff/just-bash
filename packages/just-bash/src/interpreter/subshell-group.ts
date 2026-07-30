@@ -26,8 +26,9 @@ import {
   SubshellExitError,
 } from "./errors.js";
 import { expandWord } from "./expansion.js";
+import { setFdEntry } from "./fd-table.js";
 import { getErrorMessage } from "./helpers/errors.js";
-import { checkFdLimit, failure, result } from "./helpers/result.js";
+import { failure, result } from "./helpers/result.js";
 import {
   isNumericFdRedirection,
   withNumericFds,
@@ -303,11 +304,7 @@ async function executeGroupBody(
       // If this is a non-standard fd (not 0), store in fileDescriptors for -u option
       const fd = redir.fd ?? 0;
       if (fd !== 0) {
-        if (!ctx.state.fileDescriptors) {
-          ctx.state.fileDescriptors = new Map();
-        }
-        checkFdLimit(ctx);
-        ctx.state.fileDescriptors.set(fd, content);
+        setFdEntry(ctx, fd, { kind: "input", content });
       } else {
         effectiveStdin = content;
       }

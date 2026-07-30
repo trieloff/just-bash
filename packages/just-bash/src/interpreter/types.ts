@@ -317,6 +317,14 @@ export interface IOState {
   groupStdin?: string;
   /** File descriptors for process substitution and here-docs */
   fileDescriptors?: Map<number, string>;
+  /**
+   * Descriptors whose `fileDescriptors` value is verbatim content rather
+   * than one of the `__file__:` / `__rw__:` / `__dupout__:` markers. Kept
+   * beside the table (which is public API and must stay `Map<number,
+   * string>`) so that file content shaped like a marker is never mistaken
+   * for one. Maintained exclusively by `fd-table.ts`.
+   */
+  inputFds?: Set<number>;
   /** Next available file descriptor for {varname}>file allocation (starts at 10) */
   nextFd?: number;
 }

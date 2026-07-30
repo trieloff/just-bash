@@ -86,21 +86,14 @@ import { expandWord, expandWordWithGlob } from "./expansion.js";
 import {
   advanceFd,
   closeFd,
+  dupFd,
   FIRST_USER_FD,
   getFdEntry,
-  getRawFd,
   readFd,
   setFdEntry,
-  setRawFd,
 } from "./fd-table.js";
 import { executeFunctionDef } from "./functions.js";
-import {
-  checkFdLimit,
-  failure,
-  OK,
-  result,
-  testResult,
-} from "./helpers/result.js";
+import { failure, OK, result, testResult } from "./helpers/result.js";
 import { isPosixSpecialBuiltin } from "./helpers/shell-constants.js";
 import { isWordLiteralMatch } from "./helpers/word-matching.js";
 import { traceSimpleCommand } from "./helpers/xtrace.js";
@@ -769,11 +762,7 @@ export class Interpreter {
         // If this is a non-standard fd (not 0), store in fileDescriptors for -u option
         const fd = redir.fd ?? 0;
         if (fd !== 0) {
-          if (!this.ctx.state.fileDescriptors) {
-            this.ctx.state.fileDescriptors = new Map();
-          }
-          checkFdLimit(this.ctx);
-          this.ctx.state.fileDescriptors.set(fd, content);
+          setFdEntry(this.ctx, fd, { kind: "input", content });
         } else {
           stdin = content;
           // A later redirection wins: stdin no longer comes from a descriptor.
@@ -946,21 +935,29 @@ export class Interpreter {
         if (args.length > 0) {
           const newCommandName = args.shift() as string;
           quotedArgs.shift();
-          return await this.runCommand(
-            newCommandName,
-            args,
-            quotedArgs,
-            stdin,
-            false,
-            false,
-            stdinSourceFd,
-          );
+          try {
+            return await this.runCommand(
+              newCommandName,
+              args,
+              quotedArgs,
+              stdin,
+              false,
+              false,
+              stdinSourceFd,
+            );
+          } finally {
+            // This path never reaches the shared teardown below, so the
+            // command-scoped descriptors have to be closed here.
+            fdScope.restore();
+          }
         }
         // No args - treat as no-op (status 0)
         // Preserve lastExitCode for command subs like $(exit 42)
+        fdScope.restore();
         return result("", "", this.ctx.state.lastExitCode);
       }
       // Literal empty command name - command not found
+      fdScope.restore();
       return failure("bash: : command not found\n", 127);
     }
 
@@ -1061,9 +1058,8 @@ export class Interpreter {
             const sourceText = isMove ? target.slice(0, -1) : target;
             const sourceFd = Number.parseInt(sourceText, 10);
             if (Number.isNaN(sourceFd)) break;
-            const sourceRaw = getRawFd(this.ctx, sourceFd);
-            if (sourceRaw !== undefined) {
-              setRawFd(this.ctx, fd, sourceRaw);
+            if (dupFd(this.ctx, fd, sourceFd)) {
+              // Duplicated an open descriptor.
             } else if (sourceFd >= FIRST_USER_FD) {
               return failure(`bash: ${sourceFd}: Bad file descriptor\n`);
             } else {
