@@ -72,6 +72,15 @@
     "exitCode": 0,
     "locked": true
   },
+  "a749acbf5a19012b": {
+    "command": "while read l; do echo \"{$l}\"; done > a.txt < in.txt > b.txt\necho \"a=[$(cat a.txt)] b=[$(cat b.txt)]\"",
+    "files": {
+      "in.txt": "e\nf\n"
+    },
+    "stdout": "a=[] b=[{e}\n{f}]\n",
+    "stderr": "",
+    "exitCode": 0
+  },
   "ab01f4156de7358b": {
     "command": "for i in 1 2; do\n  while true; do echo \"n$i\"; break; done\ndone > out.txt\ncat out.txt",
     "files": {},
@@ -100,6 +109,15 @@
     "command": "while true; do\n  while true; do echo inner; break; done > inner.txt\n  echo outer\n  break\ndone > outer.txt\necho \"inner=[$(cat inner.txt)] outer=[$(cat outer.txt)]\"",
     "files": {},
     "stdout": "inner=[inner] outer=[outer]\n",
+    "stderr": "",
+    "exitCode": 0
+  },
+  "cf6e0185b56c7166": {
+    "command": "while read l; do echo \"got:$l\"; done > f.txt < f.txt\necho \"rc=$? f=[$(cat f.txt)]\"",
+    "files": {
+      "f.txt": "l1\nl2\n"
+    },
+    "stdout": "rc=0 f=[]\n",
     "stderr": "",
     "exitCode": 0
   }

@@ -84,22 +84,35 @@ type LoopRedirectPrep =
 /**
  * Prepare the loop-level redirections of a `while`/`until` loop.
  *
- * Bash installs a loop's redirections once, before the loop starts, and keeps
- * them in effect for the condition and every iteration. That happens in two
- * steps here:
+ * Bash installs a loop's redirections once, before the loop starts, keeps them
+ * in effect for the condition and every iteration, and processes the list
+ * STRICTLY LEFT TO RIGHT — so a redirection that fails leaves every earlier
+ * one already applied. `done > out < nosuch` truncates `out` and then fails;
+ * `done < nosuch > out` fails first and leaves `out` alone.
  *
- * 1. Input redirections (`< file`, here-docs, here-strings) are consumed to
- *    produce the stdin the loop body reads from — this is what makes
- *    `while read line; do ...; done < file` work.
- * 2. Every other redirection is treated exactly like the redirections on a
- *    `for`/`case` compound command: pre-opened now (so `>` truncates its
- *    target before the condition can read it) and applied to the loop's
- *    collected output once the loop finishes.
+ * The walk below reproduces that order:
  *
- * Input redirections are deliberately kept out of the pre-open/apply list.
- * They are already fully consumed here, and routing them through
- * `preOpenOutputRedirects` would expand their targets a second time — with
- * here-string globbing semantics that bash does not apply to `<<<`.
+ * - Input redirections (`< file`, here-docs, here-strings) are consumed as
+ *   encountered to produce the stdin the loop body reads from — this is what
+ *   makes `while read line; do ...; done < file` work. A failure here aborts
+ *   with the diagnostic routed through the redirections opened so far, which
+ *   is why `done 2> err < nosuch` lands the message in `err` like bash does.
+ * - Every other redirection is collected into a pending run and pre-opened the
+ *   moment an input redirection (or the end of the list) is reached, using the
+ *   same `preOpenOutputRedirects`/`applyRedirections` pair as `for`/`case`.
+ *   Pre-opening truncates `>` targets before the condition can read them, so
+ *   `done > f < f` sees an empty `f`.
+ *
+ * Two invariants worth preserving when touching this:
+ *
+ * - `ExpandedRedirectTargets` is keyed by POSITION in the array handed to
+ *   `preOpenOutputRedirects`. Each pending run is a fresh call, so its keys
+ *   are rebased onto the accumulated `opened` array before being merged —
+ *   `opened` and `targets` must stay index-coherent for `applyRedirections`.
+ * - Input redirections never enter the pre-open/apply list. They are already
+ *   fully consumed here, and routing them through `preOpenOutputRedirects`
+ *   would expand their targets a second time — with here-string globbing
+ *   semantics that bash does not apply to `<<<`.
  */
 async function prepareLoopRedirections(
   ctx: InterpreterContext,
@@ -107,7 +120,46 @@ async function prepareLoopRedirections(
 ): Promise<LoopRedirectPrep> {
   let ownStdin: string | undefined;
 
+  // Output redirections already pre-opened, in list order, with their
+  // pre-expanded targets keyed by position in `opened`.
+  const opened: RedirectionNode[] = [];
+  const targets: ExpandedRedirectTargets = new Map();
+  // The run of output redirections seen since the last input redirection.
+  let pending: RedirectionNode[] = [];
+
+  /** Pre-open the pending run, rebasing its target keys onto `opened`. */
+  const openPending = async (): Promise<ExecResult | null> => {
+    if (pending.length === 0) {
+      return null;
+    }
+    const run = pending;
+    pending = [];
+    const prepared = await preOpenOutputRedirects(ctx, run);
+    if (prepared.error) {
+      return prepared.error;
+    }
+    const offset = opened.length;
+    for (const [index, target] of prepared.targets) {
+      targets.set(offset + index, target);
+    }
+    opened.push(...run);
+    return null;
+  };
+
   for (const redir of redirections) {
+    if (!LOOP_STDIN_OPERATORS.has(redir.operator)) {
+      pending.push(redir);
+      continue;
+    }
+
+    // Everything to the left of this input redirection is opened first.
+    const openError = await openPending();
+    if (openError) {
+      return {
+        error: await applyRedirections(ctx, openError, opened, targets),
+      };
+    }
+
     if (
       (redir.operator === "<<" || redir.operator === "<<-") &&
       redir.target.type === "HereDoc"
@@ -129,28 +181,26 @@ async function prepareLoopRedirections(
         const filePath = ctx.fs.resolvePath(ctx.state.cwd, target);
         ownStdin = await ctx.fs.readFile(filePath);
       } catch {
-        // A failed input redirection aborts the loop before any output
-        // redirection is opened, so a later `> file` is left untouched.
+        // Redirections to the left are already installed and apply to the
+        // diagnostic; the ones to the right are never opened.
         return {
-          error: failure(`bash: ${target}: No such file or directory\n`),
+          error: await applyRedirections(
+            ctx,
+            failure(`bash: ${target}: No such file or directory\n`),
+            opened,
+            targets,
+          ),
         };
       }
     }
   }
 
-  const outputRedirections = redirections.filter(
-    (redir) => !LOOP_STDIN_OPERATORS.has(redir.operator),
-  );
-  const prepared = await preOpenOutputRedirects(ctx, outputRedirections);
-  if (prepared.error) {
-    return { error: prepared.error };
+  const openError = await openPending();
+  if (openError) {
+    return { error: await applyRedirections(ctx, openError, opened, targets) };
   }
 
-  return {
-    ownStdin,
-    redirections: outputRedirections,
-    targets: prepared.targets,
-  };
+  return { ownStdin, redirections: opened, targets };
 }
 
 /**

@@ -57,6 +57,30 @@ describe("loop stdin redirections - Real Bash Comparison", () => {
       );
     });
 
+    it("should send output to the last target with > a < in > b", async () => {
+      const env = await setupFiles(testDir, { "in.txt": "e\nf\n" });
+      await compareOutputs(
+        env,
+        testDir,
+        [
+          'while read l; do echo "{$l}"; done > a.txt < in.txt > b.txt',
+          'echo "a=[$(cat a.txt)] b=[$(cat b.txt)]"',
+        ].join("\n"),
+      );
+    });
+
+    it("should truncate before reading with > f < f", async () => {
+      const env = await setupFiles(testDir, { "f.txt": "l1\nl2\n" });
+      await compareOutputs(
+        env,
+        testDir,
+        [
+          'while read l; do echo "got:$l"; done > f.txt < f.txt',
+          'echo "rc=$? f=[$(cat f.txt)]"',
+        ].join("\n"),
+      );
+    });
+
     it("should keep plain `done < file` working", async () => {
       const env = await setupFiles(testDir, { "in.txt": "one\ntwo\n" });
       await compareOutputs(
