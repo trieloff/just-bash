@@ -20,7 +20,7 @@ import { parseOptions } from "./parse.js";
 import {
   applyWriteOut,
   extractFilename,
-  formatHeaders,
+  formatHeaderBlock,
 } from "./response-formatting.js";
 import type { CurlOptions } from "./types.js";
 
@@ -208,9 +208,11 @@ function buildOutput(
 
   // Include headers with -i/--include
   if (options.includeHeaders && !options.verbose) {
-    output += `HTTP/1.1 ${result.status} ${result.statusText}\r\n`;
-    output += formatHeaders(result.headers);
-    output += "\r\n\r\n";
+    output += formatHeaderBlock(
+      result.status,
+      result.statusText,
+      result.headers,
+    );
   }
 
   // Add body (unless head-only mode)
@@ -220,9 +222,11 @@ function buildOutput(
     // For HEAD, we already showed headers
   } else {
     // HEAD without -i shows headers
-    output += `HTTP/1.1 ${result.status} ${result.statusText}\r\n`;
-    output += formatHeaders(result.headers);
-    output += "\r\n";
+    output += formatHeaderBlock(
+      result.status,
+      result.statusText,
+      result.headers,
+    );
   }
 
   // Write-out format
@@ -320,28 +324,50 @@ export const curlCommand: RuntimeCommand = {
         return { stdout: "", stderr, exitCode: 22 };
       }
 
+      const headerBlock = formatHeaderBlock(
+        result.status,
+        result.statusText,
+        result.headers,
+      );
+
+      // -D/--dump-header FILE writes headers to a file (`-` means stdout)
+      if (options.dumpHeader !== undefined && options.dumpHeader !== "-") {
+        const dumpPath = ctx.fs.resolvePath(ctx.cwd, options.dumpHeader);
+        await ctx.fs.writeFile(dumpPath, headerBlock);
+      }
+
       let output = buildOutput(options, result, url);
 
-      // Write to file
+      // Write body to file when -o/-O is set
       if (options.outputFile || options.useRemoteName) {
         const filename = options.outputFile || extractFilename(url);
         const filePath = ctx.fs.resolvePath(ctx.cwd, filename);
         await ctx.fs.writeFile(filePath, options.headOnly ? "" : result.body);
 
-        // When writing to file, don't output body to stdout unless verbose
-        if (!options.verbose) {
+        // Body goes to the file; stdout keeps verbose chatter, or just the
+        // header block for `-D -` (real curl), otherwise empty.
+        if (options.verbose) {
+          // keep verbose output — pre-existing behavior
+        } else if (options.dumpHeader === "-") {
+          output = headerBlock;
+        } else {
           output = "";
         }
 
-        // Add write-out after file write
         if (options.writeOut) {
-          output = applyWriteOut(options.writeOut, {
-            status: result.status,
-            headers: result.headers,
-            url: result.url,
-            bodyLength: result.body.byteLength,
-          });
+          output =
+            (options.dumpHeader === "-" ? headerBlock : "") +
+            applyWriteOut(options.writeOut, {
+              status: result.status,
+              headers: result.headers,
+              url: result.url,
+              bodyLength: result.body.byteLength,
+            });
         }
+      } else if (options.dumpHeader === "-") {
+        // No -o: prepend the dump block. When -i/-I/verbose already emitted
+        // headers, this doubles them the way real `curl -D - -i` does.
+        output = headerBlock + output;
       }
 
       // The response body is a latin1-shaped byte buffer (see
