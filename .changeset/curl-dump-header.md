@@ -2,4 +2,4 @@
 "just-bash": patch
 ---
 
-Implement `curl -D` / `--dump-header` so response headers can be written to a file or stdout (`-D -`)
+Implement `curl -D` / `--dump-header` (file, `-`, `--dump-header=`, redirect hops, `-f` dumps). `curl -I` header blocks now end with a blank line (`\r\n\r\n`), matching real curl.

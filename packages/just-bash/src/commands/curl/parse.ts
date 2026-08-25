@@ -261,6 +261,17 @@ export function parseOptions(args: string[]): CurlOptions | ExecResult {
         };
       }
       options.dumpHeader = value;
+    } else if (arg.startsWith("--dump-header=")) {
+      const value = arg.slice(14);
+      if (value === "") {
+        return {
+          stdout: "",
+          stderr:
+            "curl: option --dump-header: blank argument where content is expected\n",
+          exitCode: 1,
+        };
+      }
+      options.dumpHeader = value;
     } else if (arg.startsWith("-D") && arg.length > 2) {
       // Real curl accepts `-Dfile` (attached path, including `-D-` for stdout)
       options.dumpHeader = arg.slice(2);
