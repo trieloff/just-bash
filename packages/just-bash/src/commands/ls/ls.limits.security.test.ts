@@ -143,4 +143,69 @@ describe("ls directory collection limits", () => {
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
   });
+
+  it("counts the synthetic -a entries against the array limit", async () => {
+    const files: Record<string, string> = {};
+    for (let i = 0; i < LIMIT; i++) files[`/d/f${i}`] = "";
+    const bash = new Bash({
+      files,
+      cwd: "/",
+      executionLimits: { maxArrayElements: LIMIT },
+    });
+    // Exactly `LIMIT` real entries, but `-a` prepends "." and ".." for a
+    // listing of LIMIT + 2.
+    const result = await bash.exec("ls -a /d");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      `bash: ls: array element limit exceeded (${LIMIT})\n`,
+    );
+    expect(result.exitCode).toBe(126);
+  });
+
+  it("charges every operand of a multi-directory listing", async () => {
+    const bash = new Bash({
+      files: { "/a/f1": "", "/a/f2": "", "/b/f1": "", "/b/f2": "" },
+      cwd: "/",
+      executionLimits: { maxTraversalEntries: 5 },
+    });
+    // Two roots plus four children is six entries against a budget of five.
+    const result = await bash.exec("ls /a /b");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "bash: ls: filesystem traversal entry limit exceeded (5)\n",
+    );
+    expect(result.exitCode).toBe(126);
+  });
+
+  it("does not materialize sibling directories before admitting them", async () => {
+    let materialized = 0;
+    class ConcurrencySpyFs extends InMemoryFs {
+      override async readdir(path: string): Promise<string[]> {
+        const entries = await super.readdir(path);
+        if (/^\/root\/d\d+$/.test(this.resolvePath("/", path))) {
+          // Yield across microtasks so a batched fan-out would overlap here.
+          for (let i = 0; i < 3; i++) await Promise.resolve();
+          materialized += entries.length;
+        }
+        return entries;
+      }
+    }
+    const files: Record<string, string> = {};
+    for (let d = 0; d < 20; d++) {
+      for (let f = 0; f < 10; f++) files[`/root/d${d}/f${f}`] = "";
+    }
+    const bash = new Bash({
+      fs: new ConcurrencySpyFs(files),
+      cwd: "/",
+      executionLimits: { maxTraversalEntries: 30 },
+    });
+    const result = await bash.exec("ls -R /root");
+    expect(result.stderr).toBe(
+      "bash: ls: filesystem traversal entry limit exceeded (30)\n",
+    );
+    expect(result.exitCode).toBe(126);
+    // Recursion stops at the first subdirectory that overruns the budget
+    // instead of reading a whole batch of siblings up front.
+    expect(materialized).toBe(10);
+  });
 });
