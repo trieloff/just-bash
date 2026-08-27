@@ -32,6 +32,37 @@ function appendLsOutput(
   return current + next;
 }
 
+/**
+ * Bound a collection of directory entries as it enters `ls`, before anything
+ * sorts, stats, classifies or formats it. A filesystem backend may return an
+ * arbitrarily large `readdir()` result, and the existing output-size limit only
+ * applies once entries have been formatted — by which point the work is already
+ * done. Piping to `head` does not help either: pipeline producers are
+ * materialized before consumers run.
+ */
+function checkEntryCount(ctx: RuntimeCommandContext, count: number): void {
+  if (count > ctx.limits.maxArrayElements) {
+    throw new ExecutionLimitError(
+      `ls: array element limit exceeded (${ctx.limits.maxArrayElements})`,
+      "array_elements",
+    );
+  }
+}
+
+/**
+ * Bound a batch of entries and reserve it against the shared traversal budget,
+ * so a recursive listing cannot bypass the per-directory bound by walking many
+ * directories that are each individually small enough.
+ */
+function admitEntries(
+  ctx: RuntimeCommandContext,
+  traversalBudget: FileTraversalBudget,
+  count: number,
+): void {
+  checkEntryCount(ctx, count);
+  traversalBudget.discover(count);
+}
+
 function joinLsLines(
   ctx: RuntimeCommandContext,
   lines: readonly string[],
@@ -478,6 +509,7 @@ async function listPath(
     // It's a directory
     let entries = await ctx.fs.readdir(fullPath);
     traversalBudget.checkpoint();
+    admitEntries(ctx, traversalBudget, entries.length);
 
     // Filter hidden files unless -a or -A
     if (!showHidden) {
@@ -616,14 +648,19 @@ async function listPath(
     if (recursive) {
       // Filter out . and .. and get directory entries
       const filteredEntries = entries.filter((e) => e !== "." && e !== "..");
+      const listedEntries = new Set(filteredEntries);
 
       // Use readdirWithFileTypes if available to avoid stat calls
       let dirEntries: { name: string; isDirectory: boolean }[] = [];
 
       if (ctx.fs.readdirWithFileTypes) {
         const entriesWithTypes = await ctx.fs.readdirWithFileTypes(fullPath);
+        traversalBudget.checkpoint();
+        // This re-reads the directory already admitted above, so bound the
+        // fresh allocation without reserving the same children twice.
+        checkEntryCount(ctx, entriesWithTypes.length);
         dirEntries = entriesWithTypes
-          .filter((e) => e.isDirectory && filteredEntries.includes(e.name))
+          .filter((e) => e.isDirectory && listedEntries.has(e.name))
           .map((e) => ({ name: e.name, isDirectory: true }));
       } else {
         // Fall back to stat calls - parallelize them
