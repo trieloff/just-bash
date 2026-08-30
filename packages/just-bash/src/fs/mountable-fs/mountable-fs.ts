@@ -15,6 +15,7 @@ import type {
 } from "../interface.js";
 import {
   DEFAULT_DIR_MODE,
+  dirname,
   isSameOrDescendantPath,
   joinPath,
   normalizePath,
@@ -440,6 +441,21 @@ export class MountableFs implements IFileSystem {
     if (!fs.createExclusive) {
       throw new ExclusiveCreateUnsupportedError(path, syscall);
     }
+
+    // A directory that exists only because a child is mounted under it is
+    // real to every reader — stat reports it, and writeFile creates through
+    // it because backends make parents on write. An exclusive create refuses
+    // a missing parent, so materialize the synthetic one first; otherwise
+    // `mktemp -p /mnt` fails on a path `stat` calls a directory.
+    const parent = dirname(relativePath);
+    if (
+      parent !== "/" &&
+      this.getChildMountPoints(dirname(normalized)).length > 0 &&
+      !(await fs.exists(parent))
+    ) {
+      await fs.mkdir(parent, { recursive: true });
+    }
+
     return fs.createExclusive(relativePath, options);
   }
 

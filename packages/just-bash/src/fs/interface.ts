@@ -223,7 +223,9 @@ export interface IFileSystem {
    *
    * Optional for backwards compatibility with external `IFileSystem`
    * implementations written before this method existed; all built-in
-   * filesystems implement it. Callers must handle its absence.
+   * filesystems implement it. Callers should route through
+   * `createExclusiveOn`, which reports a filesystem that cannot do this
+   * rather than substituting a non-atomic sequence.
    *
    * @throws Error with an `EEXIST:` message if the path already exists
    * @throws Error with an `ENOENT:` message if the parent does not exist
