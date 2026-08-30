@@ -406,6 +406,34 @@ describe("mktemp", () => {
     expect(result.stdout).toContain("mktemp - create a temporary file");
   });
 
+  it("should treat an attached short value as the value, not more flags", async () => {
+    // -ph is -p with the directory "h"; the h must not be read as -h.
+    const env = new Bash();
+    const result = await env.exec("mktemp -u -ph");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/^h\/tmp\.[0-9A-Za-z]{10}\n$/);
+  });
+
+  it("should accept an attached -p value in a cluster", async () => {
+    const env = new Bash();
+    const result = await env.exec("mkdir -p /work && mktemp -dp/work");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toMatch(/^\/work\/tmp\.[0-9A-Za-z]{10}\n$/);
+
+    const stat = await env.exec(`stat -c '%F %a' ${result.stdout.trim()}`);
+    expect(stat.stdout).toBe("directory 700\n");
+  });
+
+  it("should still short-circuit on -h inside a boolean cluster", async () => {
+    const env = new Bash();
+    const result = await env.exec("mktemp -dh");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("mktemp - create a temporary file");
+  });
+
   it("should show help", async () => {
     const env = new Bash();
     const result = await env.exec("mktemp --help");

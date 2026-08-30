@@ -129,9 +129,13 @@ function eachArg(
 function reachedHelpOrVersion(args: string[]): "help" | "version" | null {
   const longs = new Set<string>();
   const shorts = new Set<string>();
+  const shortsTakingValue = new Set<string>();
   for (const def of Object.values(argDefs) as ArgDef[]) {
     if (def.long) longs.add(def.long);
-    if (def.short) shorts.add(def.short);
+    if (def.short) {
+      shorts.add(def.short);
+      if (def.type !== "boolean") shortsTakingValue.add(def.short);
+    }
   }
 
   let result: "help" | "version" | null = null;
@@ -157,6 +161,9 @@ function reachedHelpOrVersion(args: string[]): "help" | "version" | null {
         stopped = true;
         return;
       }
+      // A value-taking short option consumes the rest of the token as its
+      // value, so `-ph` is -p with the directory "h", not -p followed by -h.
+      if (shortsTakingValue.has(char)) return;
     }
   });
 
