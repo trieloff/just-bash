@@ -380,6 +380,32 @@ describe("mktemp", () => {
     expect(result.exitCode).toBe(1);
   });
 
+  it("should report an invalid option that precedes --help", async () => {
+    // GNU short-circuits only when it reaches --help, so anything invalid
+    // before it still wins.
+    const env = new Bash();
+    const result = await env.exec("mktemp --bad --help");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("mktemp: unrecognized option '--bad'\n");
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("should report an invalid short option that precedes --help", async () => {
+    const env = new Bash();
+    const result = await env.exec("mktemp -Zp /tmp --help");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("mktemp: invalid option -- 'Z'\n");
+    expect(result.exitCode).toBe(1);
+  });
+
+  it("should print help when --help is reached before an invalid option", async () => {
+    const env = new Bash();
+    const result = await env.exec("mktemp --help --bad");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("mktemp - create a temporary file");
+  });
+
   it("should show help", async () => {
     const env = new Bash();
     const result = await env.exec("mktemp --help");

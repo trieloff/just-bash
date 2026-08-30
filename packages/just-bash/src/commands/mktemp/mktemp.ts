@@ -6,7 +6,7 @@ import type {
   RuntimeCommand,
   RuntimeCommandContext,
 } from "../../types.js";
-import { parseArgs } from "../../utils/args.js";
+import { type ArgDef, parseArgs } from "../../utils/args.js";
 import { showHelp } from "../help.js";
 
 /**
@@ -116,13 +116,51 @@ function eachArg(
   }
 }
 
-/** True when `flag` appears in an option position, not as a value or operand. */
-function hasOption(args: string[], flag: string): boolean {
-  let found = false;
+/**
+ * Find a reached `--help`/`-h` or `--version`, scanning in the order the
+ * parser will.
+ *
+ * GNU short-circuits when it *reaches* one of these, so anything invalid
+ * before it still wins: `mktemp --bad --help` reports the bad option, while
+ * `mktemp --help --bad` prints help. Scanning stops at the first unrecognized
+ * option and lets the parser produce the diagnostic for it, which keeps one
+ * source of truth for what is valid.
+ */
+function reachedHelpOrVersion(args: string[]): "help" | "version" | null {
+  const longs = new Set<string>();
+  const shorts = new Set<string>();
+  for (const def of Object.values(argDefs) as ArgDef[]) {
+    if (def.long) longs.add(def.long);
+    if (def.short) shorts.add(def.short);
+  }
+
+  let result: "help" | "version" | null = null;
+  let stopped = false;
+
   eachArg(args, (arg, isOption) => {
-    if (isOption && arg === flag) found = true;
+    if (stopped || result || !isOption) return;
+
+    if (arg.startsWith("--")) {
+      const name = arg.slice(2).split("=")[0];
+      if (name === "help") result = "help";
+      else if (name === "version") result = "version";
+      else if (!longs.has(name)) stopped = true;
+      return;
+    }
+
+    for (const char of arg.slice(1)) {
+      if (char === "h") {
+        result = "help";
+        return;
+      }
+      if (!shorts.has(char)) {
+        stopped = true;
+        return;
+      }
+    }
   });
-  return found;
+
+  return result;
 }
 
 /**
@@ -252,13 +290,14 @@ export const mktempCommand: RuntimeCommand = {
     args: string[],
     ctx: RuntimeCommandContext,
   ): Promise<ExecResult> {
-    // Only in an option position: `mktemp -- --help` treats --help as a
-    // template and `mktemp -p --help` treats it as the directory, as GNU
-    // option parsing requires.
-    if (hasOption(args, "--help") || hasOption(args, "-h")) {
+    // Only when actually reached as an option: `mktemp -- --help` treats it
+    // as a template, `mktemp -p --help` as the directory, and
+    // `mktemp --bad --help` reports the invalid option first.
+    const metaFlag = reachedHelpOrVersion(args);
+    if (metaFlag === "help") {
       return showHelp(mktempHelp);
     }
-    if (hasOption(args, "--version")) {
+    if (metaFlag === "version") {
       return { stdout: MKTEMP_VERSION, stderr: "", exitCode: 0 };
     }
 
