@@ -424,4 +424,79 @@ describe("exit status of commands with no command word", () => {
       expect(result.exitCode).toBe(0);
     });
   });
+
+  describe("shapes reported from the field", () => {
+    // Contributed on PR #400 by the SLICC integration that hit this in
+    // production, where it cost an 18-step bisection. Kept as written, because
+    // each one isolates a different reason the bug was hard to see.
+    it("should reset $? with no control flow involved at all", async () => {
+      const env = new Bash();
+      const result = await env.exec(`false; x=1; y=2; echo "status=$?"`);
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should reset $? for an assignment ending a subshell", async () => {
+      const env = new Bash();
+      const result = await env.exec(`( false; x=1 ); echo "status=$?"`);
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should survive a defaults helper whose else ends in an assignment", async () => {
+      // The production shape: the assignment is the natural last statement, so
+      // its status becomes the function's, and under set -e the script's fate.
+      const env = new Bash();
+      const result = await env.exec(
+        `set -e\ncfg() { if [ -n "$1" ]; then val="$1"; else val="fallback"; fi; }\ncfg ""\necho "val=$val"`,
+      );
+      expect(result.stdout).toBe("val=fallback\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should agree with the assignment builtins that were never affected", async () => {
+      // `local`, `export` and `declare` are real command words, so they always
+      // took the normal path and reported their own status. Re-declaring with
+      // `local` was the field workaround; this pins that the two paths now
+      // agree rather than that one of them is right by accident.
+      const env = new Bash();
+      const script = (assign: string) =>
+        `set -e\nf() { if false; then :; else ${assign}; fi; }\nf\necho ok`;
+      for (const assign of ["local v=1", "export E=1", "declare d=1", "v=1"]) {
+        const result = await env.exec(script(assign));
+        expect(result.stdout, assign).toBe("ok\n");
+        expect(result.exitCode, assign).toBe(0);
+      }
+    });
+
+    it("should behave the same whether or not a statement follows", async () => {
+      // Adding any statement after the assignment masked the bug completely,
+      // so a script failed or not depending on where the assignment fell.
+      const env = new Bash();
+      const trailing = await env.exec(
+        `set -e\nif false; then :; else x=1; echo "x=$x"; fi\necho done`,
+      );
+      expect(trailing.stdout).toBe("x=1\ndone\n");
+      expect(trailing.exitCode).toBe(0);
+
+      const bare = await env.exec(
+        `set -e\nif false; then :; else x=1; fi\necho done`,
+      );
+      expect(bare.stdout).toBe("done\n");
+      expect(bare.exitCode).toBe(0);
+    });
+
+    it("should leave a loop followed by an assignment alone", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `set -e; while false; do :; done; y=2; echo done`,
+      );
+      expect(result.stdout).toBe("done\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
 });
