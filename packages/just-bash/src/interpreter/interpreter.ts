@@ -84,6 +84,7 @@ import { advanceFd } from "./fd-table.js";
 import { executeFunctionDef } from "./functions.js";
 import { failure, OK, result, testResult } from "./helpers/result.js";
 import { isPosixSpecialBuiltin } from "./helpers/shell-constants.js";
+import { nullCommandExitStatus } from "./helpers/substitution-status.js";
 import { isWordLiteralMatch } from "./helpers/word-matching.js";
 import { traceSimpleCommand } from "./helpers/xtrace.js";
 import { executePipeline as executePipelineHelper } from "./pipeline-execution.js";
@@ -678,10 +679,6 @@ export class Interpreter {
     }
     const tempAssignments = assignmentResult.tempAssignments;
     const xtraceAssignmentOutput = assignmentResult.xtraceOutput;
-    // Captured before the redirection targets are expanded: a substitution in
-    // a target (`> $(pick-file)`) does not set `$?` in bash, only one in an
-    // assignment value does.
-    const assignmentExitCode = this.ctx.state.lastSubstitutionExitCode ?? 0;
     const restoreTempAssignments = (): void => {
       for (const [name, value] of tempAssignments) {
         if (value === undefined) this.ctx.state.env.delete(name);
@@ -714,10 +711,11 @@ export class Interpreter {
             transaction.finish();
           }
         }
+        // After `prepare`, so a substitution in a redirection target counts.
         const baseResult = result(
           "",
           xtraceAssignmentOutput,
-          assignmentExitCode,
+          nullCommandExitStatus(this.ctx.state, node.redirections),
         );
         const redirected = await applyRedirections(
           this.ctx,
@@ -740,7 +738,11 @@ export class Interpreter {
       const stderrOutput =
         (this.ctx.state.expansionStderr || "") + xtraceAssignmentOutput;
       this.ctx.state.expansionStderr = "";
-      return result("", stderrOutput, assignmentExitCode);
+      return result(
+        "",
+        stderrOutput,
+        nullCommandExitStatus(this.ctx.state, []),
+      );
     }
 
     // Mark prefix assignment variables as temporarily exported for this command
@@ -855,10 +857,6 @@ export class Interpreter {
       quotedArgs.shift();
     }
 
-    // Word expansion is done; anything a redirection target expands to below
-    // must not change the status this command reports.
-    const expansionExitCode = this.ctx.state.lastSubstitutionExitCode ?? 0;
-
     const transaction = createRedirectionTransaction(
       this.ctx,
       node.redirections,
@@ -895,7 +893,11 @@ export class Interpreter {
         // No args - treat as a no-op that reports the status of a command
         // substitution in the word (`$(exit 42)` is 42) and 0 otherwise.
         transaction.finish();
-        return result("", "", expansionExitCode);
+        return result(
+          "",
+          "",
+          nullCommandExitStatus(this.ctx.state, node.redirections),
+        );
       }
       // Literal empty command name - command not found
       transaction.finish();

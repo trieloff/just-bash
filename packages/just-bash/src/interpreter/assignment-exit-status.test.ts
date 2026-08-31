@@ -5,9 +5,11 @@ import { Bash } from "../Bash.js";
  * `$?` after a command that has no command word.
  *
  * Bash gives a bare assignment status 0 — it does not re-report whatever ran
- * before it. The only thing that can change that is a command substitution in
- * one of the assigned values (`x=$(exit 7)` is 7); a substitution in a
- * redirection target is not one of those.
+ * before it. The only thing that can change that is a command substitution
+ * performed while expanding the command: an assigned value (`x=$(exit 7)` is
+ * 7) or a redirection word (`> /dev/null$(exit 5)` is 5), last one wins. A
+ * redirection onto fd 0 overrides all of it with 0, because bash performs
+ * such a command's redirections in a forked child.
  *
  * Leaking the previous status here is invisible until something reads it. An
  * `else` branch is the sharp edge: it runs with `$?` set to 1 by the failed
@@ -132,7 +134,7 @@ describe("exit status of commands with no command word", () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it("should report the substitution even with a redirection attached", async () => {
+    it("should report a value substitution when the target has none", async () => {
       const env = new Bash();
       const result = await env.exec(
         `false; x=$(exit 7) > /tmp/out; echo "status=$?"`,
@@ -257,6 +259,168 @@ describe("exit status of commands with no command word", () => {
       const result = await env.exec(`false; x=1; exit`);
       expect(result.stdout).toBe("");
       expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe("substitutions in redirection words count too", () => {
+    it("should report a substitution in a bare redirection's target", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `true; > /dev/null$(exit 5); echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=5\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should let a target substitution outrank an earlier value one", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `false; x=$(exit 7) > /dev/null$(exit 5); echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=5\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should report the last target when several redirections carry one", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `x=$(exit 7) > /dev/null$(exit 5) > /dev/null$(exit 3); echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=3\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should expand assignments before redirections, whatever the order written", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `> /dev/null$(exit 5) x=$(exit 7); echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=5\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should report a target substitution on an empty command word", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `false; e=; $e > /dev/null$(exit 5); echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=5\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should leave a command that has a command word alone", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `true; echo hi > /dev/null$(exit 5); echo "status=$?"`,
+      );
+      // "hi" went to /dev/null; the command's own status wins over the target's.
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe("a redirection onto fd 0 reports success", () => {
+    // bash performs a null command's redirections in a forked child when one
+    // of them reads stdin, so the substitution status is discarded. bash 3.2
+    // predates that fork and keeps the status; these follow bash 5.x, which
+    // the comparison fixtures are recorded against.
+    it("should discard the value substitution for an input redirection", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `x=$(exit 7) < /dev/null; echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should discard it for a here-string", async () => {
+      const env = new Bash();
+      const result = await env.exec(`x=$(exit 7) <<< x; echo "status=$?"`);
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should discard it for a read-write open on fd 0", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `e=; $e <> /dev/null$(exit 5); echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should discard it when fd 0 is closed", async () => {
+      const env = new Bash();
+      const result = await env.exec(`x=$(exit 7) 0<&-; echo "status=$?"`);
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should keep the status for an input redirection on another fd", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `x=$(exit 7) 3< /dev/null; echo "status=$?"`,
+      );
+      expect(result.stdout).toBe("status=7\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should keep the status when fd 0 is only the source of a dup", async () => {
+      const env = new Bash();
+      const result = await env.exec(`x=$(exit 7) 3<&0; echo "status=$?"`);
+      expect(result.stdout).toBe("status=7\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should keep the status for an output redirection", async () => {
+      const env = new Bash();
+      const result = await env.exec(`x=$(exit 7) 1>&2; echo "status=$?"`);
+      expect(result.stdout).toBe("status=7\n");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+  });
+
+  describe("PS4 expansion under set -x", () => {
+    // The trace prefix is expanded for output only; a substitution in it is
+    // not one of the command's own expansions.
+    it("should not let a PS4 substitution become a bare assignment's status", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `PS4='$(exit 4)+'\nset -x\nfalse\nx=1\ns=$?\nset +x\necho "status=$s"`,
+      );
+      expect(result.stdout).toBe("status=0\n");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should not let a PS4 substitution outrank the assigned value's", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `PS4='$(exit 4)+'\nset -x\nfalse\nx=$(exit 7)\ns=$?\nset +x\necho "status=$s"`,
+      );
+      expect(result.stdout).toBe("status=7\n");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("should not let a PS4 substitution become a bare redirection's status", async () => {
+      const env = new Bash();
+      const result = await env.exec(
+        `PS4='$(exit 4)+'\nset -x\nfalse\n> /dev/null\ns=$?\nset +x\necho "status=$s"`,
+      );
+      expect(result.stdout).toBe("status=0\n");
       expect(result.exitCode).toBe(0);
     });
   });
