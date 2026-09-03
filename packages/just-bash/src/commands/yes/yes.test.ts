@@ -90,6 +90,41 @@ describe("yes", () => {
       expect(result.exitCode).toBe(0);
     });
 
+    it("emits nothing when no iteration is permitted", async () => {
+      const env = new Bash({ executionLimits: { maxLoopIterations: 0 } });
+      const result = await env.exec("yes");
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("");
+      expect(result.exitCode).toBe(0);
+    });
+
+    it("charges the joined operands, not just the repetition", async () => {
+      const env = new Bash({
+        executionLimits: { maxLoopIterations: 1, maxOutputSize: 8 },
+      });
+      // Every operand fits on its own, but the line they build together does
+      // not, so the join is what reports the limit.
+      const result = await env.exec("yes aaaa bbbb cccc");
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "bash: yes: output size limit exceeded (8 bytes)\n",
+      );
+      expect(result.exitCode).toBe(126);
+    });
+
+    it("counts the newline against the line budget", async () => {
+      const env = new Bash({
+        executionLimits: { maxLoopIterations: 1, maxOutputSize: 4 },
+      });
+      // "abcd" is exactly the budget, so "abcd\n" cannot fit.
+      const result = await env.exec("yes abcd");
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe(
+        "bash: yes: output size limit exceeded (4 bytes)\n",
+      );
+      expect(result.exitCode).toBe(126);
+    });
+
     it("reports the output limit when one line does not fit", async () => {
       const env = new Bash({ executionLimits: { maxOutputSize: 2 } });
       const result = await env.exec("yes abc");
@@ -122,6 +157,14 @@ describe("yes", () => {
     it("errors on an unknown short option", async () => {
       const env = new Bash();
       const result = await env.exec("yes -x");
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("yes: invalid option -- 'x'\n");
+      expect(result.exitCode).toBe(1);
+    });
+
+    it("names the first letter of a grouped short option", async () => {
+      const env = new Bash();
+      const result = await env.exec("yes -xy");
       expect(result.stdout).toBe("");
       expect(result.stderr).toBe("yes: invalid option -- 'x'\n");
       expect(result.exitCode).toBe(1);

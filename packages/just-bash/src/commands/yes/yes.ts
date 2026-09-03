@@ -1,4 +1,4 @@
-import { boundedRepeat } from "../../bounded-builder.js";
+import { boundedJoin, boundedRepeat } from "../../bounded-builder.js";
 import { utf8ByteLength } from "../../encoding.js";
 import type {
   ExecResult,
@@ -49,26 +49,33 @@ export const yesCommand: RuntimeCommand = {
       }
       // A lone "-" is an operand, as in GNU yes; anything else that starts
       // with a dash is an option, even after an operand (getopt permutes).
-      if (arg.startsWith("-") && arg !== "-") {
+      // Grouped short options are reported by their first offending letter,
+      // the way getopt does: `yes -xy` names 'x', not 'xy'.
+      if (arg.startsWith("--")) {
         return unknownOption("yes", arg);
+      }
+      if (arg.startsWith("-") && arg !== "-") {
+        return unknownOption("yes", `-${arg[1]}`);
       }
       operands.push(arg);
     }
 
-    const line = `${operands.length > 0 ? operands.join(" ") : "y"}\n`;
     const maxBytes = Math.min(
       ctx.limits.maxStringLength,
       ctx.limits.maxOutputSize,
     );
-    // A single line still has to be emitted (and may legitimately blow the
-    // output budget, which boundedRepeat reports), so never floor to zero.
-    const lines = Math.max(
-      1,
-      Math.min(
-        ctx.limits.maxLoopIterations,
-        Math.floor(maxBytes / utf8ByteLength(line)),
-      ),
-    );
+    // Many large operands can build one huge line, so charge the join too. The
+    // newline is charged by the repetition below, which keeps the reported
+    // limit equal to the configured one.
+    const line =
+      operands.length > 0
+        ? `${boundedJoin(operands, " ", maxBytes, "yes")}\n`
+        : "y\n";
+    const fits = Math.floor(maxBytes / utf8ByteLength(line));
+    // One line that cannot fit is still attempted, so boundedRepeat reports the
+    // output limit rather than silently printing nothing. Zero permitted
+    // iterations, on the other hand, means zero lines.
+    const lines = Math.min(ctx.limits.maxLoopIterations, Math.max(1, fits));
 
     return {
       stdout: boundedRepeat(line, lines, maxBytes, "yes"),
