@@ -37,6 +37,7 @@ const FAILURE_MESSAGES = nullPrototype<Record<CanonicalizeFailure, string>>({
   ENOENT: "No such file or directory",
   ENOTDIR: "Not a directory",
   ELOOP: "Too many levels of symbolic links",
+  EACCES: "Permission denied",
 });
 
 interface ParsedArgs {
@@ -197,6 +198,11 @@ export const realpathCommand: RuntimeCommand = {
       };
     }
 
+    const outputLimit = Math.min(
+      ctx.limits.maxStringLength,
+      ctx.limits.maxOutputSize,
+    );
+
     const budget = new FileTraversalBudget({
       limits: ctx.limits,
       signal: ctx.signal,
@@ -260,11 +266,10 @@ export const realpathCommand: RuntimeCommand = {
       anchor = base;
     }
 
-    const output = new BoundedStringBuilder(
-      Math.min(ctx.limits.maxStringLength, ctx.limits.maxOutputSize),
-      "realpath",
-    );
-    let stderr = "";
+    const output = new BoundedStringBuilder(outputLimit, "realpath");
+    // Diagnostics are charged too: an operand can fail without touching the
+    // filesystem (the empty name), so nothing else bounds this.
+    const diagnostics = new BoundedStringBuilder(outputLimit, "realpath");
     let failed = false;
 
     for (const operand of operands) {
@@ -277,7 +282,7 @@ export const realpathCommand: RuntimeCommand = {
       );
       if (!resolved.ok) {
         failed = true;
-        stderr += fail(operand, resolved.code);
+        diagnostics.append(fail(operand, resolved.code));
         continue;
       }
       const printable =
@@ -290,7 +295,7 @@ export const realpathCommand: RuntimeCommand = {
 
     return {
       stdout: output.build(),
-      stderr,
+      stderr: diagnostics.build(),
       exitCode: failed ? 1 : 0,
     };
   },
