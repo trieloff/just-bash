@@ -434,6 +434,49 @@ describe("mktemp", () => {
     expect(result.stdout).toContain("mktemp - create a temporary file");
   });
 
+  it("should not read a template as a short-option cluster", async () => {
+    // Regression: the option scan walked operands too, so a template whose
+    // second character is "h" printed help and `f=$(mktemp chartXXXX)`
+    // captured the help text as the path.
+    const env = new Bash({ cwd: "/home/user" });
+    for (const template of ["chartXXXX", "thumbXXXX", "shXXXXXX", "dXXXX"]) {
+      const result = await env.exec(`mktemp ${template}`);
+      expect({
+        t: template,
+        err: result.stderr,
+        code: result.exitCode,
+      }).toEqual({ t: template, err: "", code: 0 });
+      expect(result.stdout).toMatch(
+        new RegExp(`^${template.replace(/X+$/, "")}[0-9A-Za-z]+\n$`),
+      );
+    }
+  });
+
+  it("should reach --help after a template, as GNU permutes", async () => {
+    const env = new Bash();
+    const result = await env.exec("mktemp fooXXXX --help");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("mktemp - create a temporary file");
+  });
+
+  it("should reject an attached value on --help and --version", async () => {
+    const env = new Bash();
+    const help = await env.exec("mktemp --help=garbage");
+    expect(help.stdout).toBe("");
+    expect(help.stderr).toBe(
+      "mktemp: option '--help' doesn't allow an argument\n",
+    );
+    expect(help.exitCode).toBe(1);
+
+    const version = await env.exec("mktemp --version=garbage");
+    expect(version.stdout).toBe("");
+    expect(version.stderr).toBe(
+      "mktemp: option '--version' doesn't allow an argument\n",
+    );
+    expect(version.exitCode).toBe(1);
+  });
+
   it("should show help", async () => {
     const env = new Bash();
     const result = await env.exec("mktemp --help");

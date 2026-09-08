@@ -108,6 +108,14 @@ function eachArg(
       visit(arg, false);
       continue;
     }
+    // An operand, not an option. Without this a template is scanned as a
+    // short cluster, so `mktemp chartXXXX` reads its "h" as -h. Scanning
+    // continues past operands because GNU permutes: `mktemp fooXXXX --help`
+    // still reaches the option.
+    if (!arg.startsWith("-") || arg === "-") {
+      visit(arg, false);
+      continue;
+    }
     // Long or short options whose value comes as the next argument.
     if (arg === "--suffix" || arg === "--tmpdir" || /^-[a-z]*p$/.test(arg)) {
       expectValue = arg !== "--tmpdir";
@@ -126,7 +134,9 @@ function eachArg(
  * option and lets the parser produce the diagnostic for it, which keeps one
  * source of truth for what is valid.
  */
-function reachedHelpOrVersion(args: string[]): "help" | "version" | null {
+type MetaFlag = "help" | "version" | `no-arg:${string}`;
+
+function reachedHelpOrVersion(args: string[]): MetaFlag | null {
   const longs = new Set<string>();
   const shorts = new Set<string>();
   const shortsTakingValue = new Set<string>();
@@ -138,17 +148,21 @@ function reachedHelpOrVersion(args: string[]): "help" | "version" | null {
     }
   }
 
-  let result: "help" | "version" | null = null;
+  let result: MetaFlag | null = null;
   let stopped = false;
 
   eachArg(args, (arg, isOption) => {
     if (stopped || result || !isOption) return;
 
     if (arg.startsWith("--")) {
-      const name = arg.slice(2).split("=")[0];
-      if (name === "help") result = "help";
-      else if (name === "version") result = "version";
-      else if (!longs.has(name)) stopped = true;
+      const eq = arg.indexOf("=");
+      const name = eq === -1 ? arg.slice(2) : arg.slice(2, eq);
+      if (name === "help" || name === "version") {
+        // GNU rejects an attached value on options that take none.
+        result = eq === -1 ? (name as "help" | "version") : `no-arg:${name}`;
+      } else if (!longs.has(name)) {
+        stopped = true;
+      }
       return;
     }
 
@@ -281,8 +295,12 @@ async function pathIsTaken(
   try {
     await ctx.fs.lstat(path);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    // Only "it is not there" means the name is free. An EACCES or ELOOP says
+    // the name could not be inspected, and reporting an unverified path as
+    // available is the failure this command exists to avoid.
+    if (isErrno(error, "ENOENT")) return false;
+    throw error;
   }
 }
 
@@ -306,6 +324,11 @@ export const mktempCommand: RuntimeCommand = {
     }
     if (metaFlag === "version") {
       return { stdout: MKTEMP_VERSION, stderr: "", exitCode: 0 };
+    }
+    if (metaFlag?.startsWith("no-arg:")) {
+      return fail(
+        `option '--${metaFlag.slice("no-arg:".length)}' doesn't allow an argument`,
+      );
     }
 
     const parsed = parseArgs("mktemp", normalizeTmpdirFlag(args), argDefs);
