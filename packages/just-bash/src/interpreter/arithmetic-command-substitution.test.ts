@@ -71,8 +71,55 @@ describe("command substitution inside arithmetic", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stdout).toBe("status=1\n");
     expect(result.stderr).toBe(
-      'bash: syntax error: operand expected (error token is "$(f)")\n',
+      'bash: $(f): syntax error: operand expected (error token is "$(f)")\n',
     );
+  });
+
+  it("does not reach command execution through variable indirection", async () => {
+    const bash = new Bash();
+
+    // GNU bash: `$(echo PWNED): syntax error: operand expected`. The command
+    // must not run just because its text reached arithmetic as *data*.
+    const result = await bash.exec(
+      'a=\'$(echo PWNED >&2; echo 1)\'\nb=a\necho "[$(( b ))]"\necho "status=$?"',
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("status=1\n");
+    expect(result.stderr).toBe(
+      'bash: $(echo PWNED >&2; echo 1): syntax error: operand expected (error token is "$(echo PWNED >&2; echo 1)")\n',
+    );
+  });
+
+  it("still expands a command substitution in an array subscript from data", async () => {
+    const bash = new Bash();
+
+    // bash *does* expand subscripts reached through data, unlike bare operands
+    // (spec-tests bugs.test.sh records this as bash behaviour).
+    const result = await bash.exec(
+      "a=(0 1 2)\nb=(3 4 5)\nsub='a[$(echo 2)]'\necho \"${b[sub]}\"",
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe("5\n");
+    expect(result.stderr).toBe("");
+  });
+
+  it("discards shell state mutated inside the substitution", async () => {
+    const bash = new Bash();
+
+    const result = await bash.exec(
+      "echo $(( $(f() { :; }; set -u; cd /tmp; echo 1) ))\n" +
+        "type f 2>&1 | head -1\n" +
+        'echo "unset=[$UNSET_VAR] status=$?"\n' +
+        'test "$PWD" != /tmp && echo cwd-kept',
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(
+      "1\nbash: type: f: not found\nunset=[] status=0\ncwd-kept\n",
+    );
+    expect(result.stderr).toBe("");
   });
 
   it("is bounded by the substitution nesting guard, like a plain one", async () => {

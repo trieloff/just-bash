@@ -11,8 +11,8 @@ import type {
 } from "../../ast/types.js";
 import { Parser } from "../../parser/parser.js";
 import { ExecutionLimitError, ExitError } from "../errors.js";
-import { cloneArrays } from "../helpers/array.js";
 import { recordSubstitutionExit } from "../helpers/substitution-status.js";
+import { beginIsolatedShellState } from "../state-transaction.js";
 import type { InterpreterContext } from "../types.js";
 
 /**
@@ -101,31 +101,28 @@ export async function runCommandSubstitution(
   const savedDepth = ctx.substitutionDepth;
   ctx.substitutionDepth = currentDepth + 1;
 
+  // The substitution reads the live state but must not write back to it: a
+  // `set -u`, a function definition or a `cd` inside $() is discarded the way
+  // bash discards a subshell's. beginIsolatedShellState swaps in copies of
+  // every mutable namespace and returns the rollback.
+  const restoreState = beginIsolatedShellState(ctx.state);
   // Command substitutions get a new BASHPID (unlike $$ which stays the same)
-  const savedBashPid = ctx.state.bashPid;
   ctx.state.bashPid = ctx.state.nextVirtualPid++;
-  // Save environment - command substitutions run in a subshell and should not
-  // modify parent environment (e.g., aliases defined inside $() should not leak)
-  const savedEnv = new Map(ctx.state.env);
-  const savedArrays = cloneArrays(ctx.state.arrays);
-  const savedCwd = ctx.state.cwd;
   // Suppress verbose mode (set -v) inside command substitutions
   // bash only prints verbose output for the main script
   const savedSuppressVerbose = ctx.state.suppressVerbose;
   ctx.state.suppressVerbose = true;
 
   const restore = (): void => {
-    ctx.state.env = savedEnv;
-    ctx.state.arrays = savedArrays;
-    ctx.state.cwd = savedCwd;
-    ctx.state.bashPid = savedBashPid;
+    restoreState();
     ctx.state.suppressVerbose = savedSuppressVerbose;
     ctx.substitutionDepth = savedDepth;
   };
 
   try {
     const result = await ctx.executeScript(body);
-    // Restore environment but preserve exit code
+    // Roll the subshell state back before publishing anything to the parent:
+    // the exit code and stderr below are the only things that cross the boundary.
     restore();
     // Store the exit code for $?
     recordSubstitutionExit(ctx.state, result.exitCode);

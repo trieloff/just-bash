@@ -120,13 +120,6 @@
     "stderr": "",
     "exitCode": 0
   },
-  "b9c0490e3bae3f1a": {
-    "command": "K=1\necho $(( $(K=99; echo 2) ))\necho \"K=$K\"",
-    "files": {},
-    "stdout": "2\nK=1\n",
-    "stderr": "",
-    "exitCode": 0
-  },
   "c618528595daa9f5": {
     "command": "echo $(( $(echo \"\") ))",
     "files": {},
@@ -138,13 +131,6 @@
     "command": "Q='$(echo PWNED)'\necho $(( `printf %s \"$Q\" | wc -c` ))",
     "files": {},
     "stdout": "13\n",
-    "stderr": "",
-    "exitCode": 0
-  },
-  "cb7c9d5c48feb69b": {
-    "command": "mkdir -p deep\nbefore=$PWD\necho $(( $(cd deep; echo 1) ))\ntest \"$PWD\" = \"$before\" && echo same",
-    "files": {},
-    "stdout": "1\nsame\n",
     "stderr": "",
     "exitCode": 0
   },

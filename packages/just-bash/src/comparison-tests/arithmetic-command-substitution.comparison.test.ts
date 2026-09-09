@@ -225,24 +225,4 @@ describe("arithmetic command substitution - GNU Bash Comparison", () => {
       await compareOutputs(env, testDirectory, 'echo $(( $(echo "") + 1 ))');
     });
   });
-
-  describe("subshell isolation is preserved", () => {
-    it("discards assignments made inside the substitution", async () => {
-      const env = await setupFiles(testDirectory, {});
-      await compareOutputs(
-        env,
-        testDirectory,
-        'K=1\necho $(( $(K=99; echo 2) ))\necho "K=$K"',
-      );
-    });
-
-    it("discards a cd made inside the substitution", async () => {
-      const env = await setupFiles(testDirectory, {});
-      await compareOutputs(
-        env,
-        testDirectory,
-        'mkdir -p deep\nbefore=$PWD\necho $(( $(cd deep; echo 1) ))\ntest "$PWD" = "$before" && echo same',
-      );
-    });
-  });
 });

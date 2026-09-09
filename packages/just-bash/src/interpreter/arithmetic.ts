@@ -36,10 +36,35 @@ import type { InterpreterContext } from "./types.js";
 interface ArithmeticResolutionContext {
   readonly visited: Set<string>;
   depth: number;
+  /**
+   * True while evaluating an expression parsed out of *data* - a variable's
+   * value or a command substitution's output - rather than out of the script
+   * text. bash re-parses such text as arithmetic but does not run expansions on
+   * it, so a `$(...)` reached this way is a syntax error, not a command.
+   */
+  fromData: boolean;
 }
 
 function createArithmeticResolutionContext(): ArithmeticResolutionContext {
-  return { visited: new Set(), depth: 0 };
+  return { visited: new Set(), depth: 0, fromData: false };
+}
+
+/**
+ * Evaluate an expression that was parsed out of data, with command
+ * substitution disabled for the whole subtree.
+ */
+async function evaluateAsData(
+  ctx: InterpreterContext,
+  expr: ArithExpr,
+  resolution: ArithmeticResolutionContext,
+): Promise<number> {
+  const savedFromData = resolution.fromData;
+  resolution.fromData = true;
+  try {
+    return await evaluateArithmeticInternal(ctx, expr, false, resolution);
+  } finally {
+    resolution.fromData = savedFromData;
+  }
 }
 
 /**
@@ -217,7 +242,7 @@ async function evaluateArithValue(
       "",
     );
   }
-  return await evaluateArithmeticInternal(ctx, expr, false, resolution);
+  return await evaluateAsData(ctx, expr, resolution);
 }
 
 async function evaluateResolvedArithValue(
@@ -304,7 +329,7 @@ async function resolveArithVariable(
     }
 
     // Evaluate the parsed expression
-    return await evaluateArithmeticInternal(ctx, expr, false, resolution);
+    return await evaluateAsData(ctx, expr, resolution);
   } finally {
     resolution.depth--;
     resolution.visited.delete(name);
@@ -417,19 +442,12 @@ async function evaluateSubstitutionOutput(
   const trimmed = output.trim();
   // An empty substitution leaves an empty expression, which bash evaluates as 0.
   if (!trimmed) return 0;
-  // bash does not re-expand the spliced text, so a substitution in the output
-  // is a literal token that the arithmetic parser cannot resolve.
-  if (trimmed.includes("$(") || trimmed.includes("`")) {
-    throw new ArithmeticError(
-      `syntax error: operand expected (error token is "${trimmed}")`,
-    );
-  }
   const parser = new Parser();
   // parseArithmeticExpression validates that the whole output was consumed, so
   // junk like "hello world" raises a syntax error instead of silently
   // truncating to the leading token.
   const { expression } = parseArithmeticExpression(parser, trimmed);
-  return await evaluateArithmeticInternal(ctx, expression, false, resolution);
+  return await evaluateAsData(ctx, expression, resolution);
 }
 
 export async function evaluateArithmetic(
@@ -453,6 +471,30 @@ async function evaluateArithmeticInternal(
 ): Promise<number> {
   const evaluate = (nestedExpr: ArithExpr, expansion = isExpansionContext) =>
     evaluateArithmeticInternal(ctx, nestedExpr, expansion, resolution);
+  /**
+   * Evaluate an array subscript. bash expands a subscript even when the
+   * surrounding expression came from data, so `x='a[$(cmd)]'; $(( x ))` runs
+   * the command (see spec-tests bugs.test.sh "command execution ... not
+   * allowed", which records this as bash behaviour). Only a bare operand
+   * reached through data is a syntax error.
+   */
+  const evaluateSubscript = async (
+    subscript: ArithExpr,
+    expansion = isExpansionContext,
+  ): Promise<number> => {
+    const savedFromData = resolution.fromData;
+    resolution.fromData = false;
+    try {
+      return await evaluateArithmeticInternal(
+        ctx,
+        subscript,
+        expansion,
+        resolution,
+      );
+    } finally {
+      resolution.fromData = savedFromData;
+    }
+  };
 
   switch (expr.type) {
     case "ArithNumber":
@@ -477,13 +519,23 @@ async function evaluateArithmeticInternal(
       // If not a simple number, evaluate as arithmetic expression
       const parser = new Parser();
       const { expr: parsed } = parseArithExpr(parser, trimmed, 0);
-      return await evaluate(parsed);
+      return await evaluateAsData(ctx, parsed, resolution);
     }
 
     case "ArithNested":
       return await evaluate(expr.expression);
 
     case "ArithCommandSubst": {
+      // Reached from a variable's value or a substitution's output rather than
+      // from the script - bash does not expand data, so this is a syntax error.
+      // Guarding here rather than by scanning the text covers indirection
+      // through any number of variables.
+      if (resolution.fromData) {
+        const token = `$(${expr.command})`;
+        throw new ArithmeticError(
+          `${token}: syntax error: operand expected (error token is "${token}")`,
+        );
+      }
       // Run the substitution in the current interpreter state, then splice its
       // output into the arithmetic expression the way bash does.
       const output = await runCommandSubstitutionText(ctx, expr.command);
@@ -556,7 +608,7 @@ async function evaluateArithmeticInternal(
 
       // Case 4: Indexed array - A[expr]
       if (expr.index) {
-        let index = await evaluate(expr.index);
+        let index = await evaluateSubscript(expr.index);
 
         // Handle negative indices - bash counts from max_index + 1
         if (index < 0) {
@@ -703,7 +755,7 @@ async function evaluateArithmeticInternal(
             const expandedKey = await getVariable(ctx, expr.operand.index.name);
             elementKey = expandedKey;
           } else if (expr.operand.index) {
-            const index = await evaluate(expr.operand.index);
+            const index = await evaluateSubscript(expr.operand.index);
             elementKey = String(index);
           } else {
             return operand;
@@ -761,7 +813,7 @@ async function evaluateArithmeticInternal(
               : expr.operand.nameExpr.name;
           }
           if (varName && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(varName)) {
-            const index = await evaluate(expr.operand.subscript);
+            const index = await evaluateSubscript(expr.operand.subscript);
             const current =
               Number.parseInt(
                 getArrayElement(ctx, varName, index) || "0",
@@ -816,11 +868,11 @@ async function evaluateArithmeticInternal(
           arrayKey = expandedKey || "\\";
         } else if (isAssoc) {
           // For non-variable subscripts on associative arrays, evaluate and convert to string
-          const index = await evaluate(expr.subscript);
+          const index = await evaluateSubscript(expr.subscript);
           arrayKey = String(index);
         } else {
           // For indexed arrays, evaluate the subscript as arithmetic
-          let index = await evaluate(expr.subscript);
+          let index = await evaluateSubscript(expr.subscript);
           // Handle negative indices
           if (index < 0) {
             const elements = getArrayElements(ctx, name);
@@ -902,7 +954,7 @@ async function evaluateArithmeticInternal(
       // Build the env key - include subscript for array assignment
       let envKey = varName;
       if (expr.subscript) {
-        const index = await evaluate(expr.subscript);
+        const index = await evaluateSubscript(expr.subscript);
         envKey = `${varName}_${index}`;
       }
       const current =
@@ -933,7 +985,7 @@ async function evaluateArithmeticInternal(
       if (!varName || !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(varName)) {
         return 0; // Invalid variable name
       }
-      const index = await evaluate(expr.subscript);
+      const index = await evaluateSubscript(expr.subscript);
       const envKey = `${varName}_${index}`;
       const value = ctx.state.env.get(envKey);
       if (value !== undefined) {
