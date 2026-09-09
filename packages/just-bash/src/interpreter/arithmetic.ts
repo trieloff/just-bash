@@ -23,10 +23,12 @@
 import type { ArithExpr } from "../ast/types.js";
 import {
   parseArithExpr,
+  parseArithmeticExpression,
   parseArithNumber,
 } from "../parser/arithmetic-parser.js";
 import { Parser } from "../parser/parser.js";
 import { ArithmeticError, NounsetError } from "./errors.js";
+import { runCommandSubstitutionText } from "./expansion/command-substitution.js";
 import { getArrayElements, getVariable } from "./expansion.js";
 import { getArrayElement, hasArray, setArrayElement } from "./helpers/array.js";
 import type { InterpreterContext } from "./types.js";
@@ -398,6 +400,38 @@ async function expandBracedContent(
   }
 }
 
+/**
+ * Evaluate the output of an arithmetic command substitution.
+ *
+ * bash splices the output into the arithmetic expression as text and then
+ * parses it, so `$(( $(echo "1 + 2") ))` is 3 and `$(( $(echo v) ))` reads the
+ * variable `v`. Empty output collapses to nothing, which bash evaluates as 0
+ * when it is the whole expression. Parsing failures raise an arithmetic error
+ * rather than silently becoming 0.
+ */
+async function evaluateSubstitutionOutput(
+  ctx: InterpreterContext,
+  output: string,
+  resolution: ArithmeticResolutionContext,
+): Promise<number> {
+  const trimmed = output.trim();
+  // An empty substitution leaves an empty expression, which bash evaluates as 0.
+  if (!trimmed) return 0;
+  // bash does not re-expand the spliced text, so a substitution in the output
+  // is a literal token that the arithmetic parser cannot resolve.
+  if (trimmed.includes("$(") || trimmed.includes("`")) {
+    throw new ArithmeticError(
+      `syntax error: operand expected (error token is "${trimmed}")`,
+    );
+  }
+  const parser = new Parser();
+  // parseArithmeticExpression validates that the whole output was consumed, so
+  // junk like "hello world" raises a syntax error instead of silently
+  // truncating to the leading token.
+  const { expression } = parseArithmeticExpression(parser, trimmed);
+  return await evaluateArithmeticInternal(ctx, expression, false, resolution);
+}
+
 export async function evaluateArithmetic(
   ctx: InterpreterContext,
   expr: ArithExpr,
@@ -450,20 +484,10 @@ async function evaluateArithmeticInternal(
       return await evaluate(expr.expression);
 
     case "ArithCommandSubst": {
-      // Execute the command and parse the result as a number
-      if (ctx.execFn) {
-        const result = await ctx.execFn(expr.command, {
-          signal: ctx.state.signal,
-        });
-        // Command substitution stderr should go to the shell's stderr at expansion time
-        if (result.stderr) {
-          ctx.state.expansionStderr =
-            (ctx.state.expansionStderr || "") + result.stderr;
-        }
-        const output = result.stdout.trim();
-        return Number.parseInt(output, 10) || 0;
-      }
-      return 0;
+      // Run the substitution in the current interpreter state, then splice its
+      // output into the arithmetic expression the way bash does.
+      const output = await runCommandSubstitutionText(ctx, expr.command);
+      return await evaluateSubstitutionOutput(ctx, output, resolution);
     }
 
     case "ArithBracedExpansion": {
@@ -959,15 +983,8 @@ async function evalConcatPartToStringAsync(
       return await getVariable(ctx, expr.name);
     case "ArithBracedExpansion":
       return await expandBracedContent(ctx, expr.content);
-    case "ArithCommandSubst": {
-      if (ctx.execFn) {
-        const result = await ctx.execFn(expr.command, {
-          signal: ctx.state.signal,
-        });
-        return result.stdout.trim();
-      }
-      return "0";
-    }
+    case "ArithCommandSubst":
+      return await runCommandSubstitutionText(ctx, expr.command);
     case "ArithConcat": {
       let result = "";
       for (const part of expr.parts) {
