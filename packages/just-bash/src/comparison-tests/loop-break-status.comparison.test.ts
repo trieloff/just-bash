@@ -128,12 +128,61 @@ describe("loop break/continue exit status - Real Bash Comparison", () => {
     );
   });
 
-  it("continue leaves $? as 0 for the next iteration", async () => {
+  // `$?` is read as the body's *first* command, so it carries over from the
+  // previous iteration - reading it after any other command would only show
+  // that command's status and hide a stale value.
+
+  it("for: continue leaves $? as 0 for the next iteration", async () => {
     const env = await setupFiles(testDir, {});
     await compareOutputs(
       env,
       testDir,
-      'for i in 1 2; do [ $i = 2 ] && echo "q=$?"; false; continue; done; echo $?',
+      'for i in 1 2; do echo "$i:$?"; false; continue; done; echo $?',
+    );
+  });
+
+  it("c-style for: continue leaves $? as 0 for the next iteration", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      'for ((i = 0; i < 2; i++)); do echo "$i:$?"; false; continue; done; echo $?',
+    );
+  });
+
+  it("while: continue leaves $? as 0 for the next iteration", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      'n=0; while [ $n -lt 2 ]; do echo "$n:$?"; n=$((n + 1)); false; continue; done; echo $?',
+    );
+  });
+
+  it("until: continue leaves $? as 0 for the next iteration", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      'n=0; until [ $n -ge 2 ]; do echo "$n:$?"; n=$((n + 1)); false; continue; done; echo $?',
+    );
+  });
+
+  it("continue 2 leaves $? as 0 in the outer loop's next iteration", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      'for i in 1 2; do echo "$i:$?"; for j in 1; do false; continue 2; done; done; echo $?',
+    );
+  });
+
+  it("$? after an inner loop left via break is 0", async () => {
+    const env = await setupFiles(testDir, {});
+    await compareOutputs(
+      env,
+      testDir,
+      'for i in 1; do for j in 1; do false; break; done; echo "after=$?"; done',
     );
   });
 
