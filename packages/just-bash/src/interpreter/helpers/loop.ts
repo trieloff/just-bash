@@ -13,6 +13,7 @@ import {
   ExitError,
   ReturnError,
 } from "../errors.js";
+import type { InterpreterContext } from "../types.js";
 import { getErrorMessage } from "./errors.js";
 
 export type LoopAction = "break" | "continue" | "rethrow" | "error";
@@ -42,6 +43,28 @@ export interface LoopErrorResult {
  *   while :; do false; break; done; echo $?   # 0, not 1
  */
 export const BREAK_CONTINUE_STATUS = 0;
+
+/**
+ * Adopt `status` as the loop's "last command executed" and publish it to `$?`.
+ *
+ * The loop tracks its own exit code for the value it finally returns, but `$?`
+ * has to move with it. A `for` loop runs nothing between the `continue` and
+ * the next iteration's first command, so leaving `$?` behind lets the failed
+ * command before the `continue` show up there:
+ *
+ *   for i in 1 2; do echo "$?"; false; continue; done   # 0 0, not 0 1
+ *
+ * `while`/`until` happen to hide this because their condition runs in between
+ * and resets `$?` - they are synchronised here all the same.
+ */
+export function adoptLoopStatus(
+  ctx: InterpreterContext,
+  status: number,
+): number {
+  ctx.state.lastExitCode = status;
+  ctx.state.env.set("?", String(status));
+  return status;
+}
 
 /**
  * Handle errors thrown during loop body execution.

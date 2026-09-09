@@ -25,6 +25,12 @@ done
 echo ok                    # never ran
 ```
 
+`$?` moves with the status, so the next iteration sees it too — a `for` loop runs nothing between the `continue` and the next iteration's first command, and would otherwise still expose the failure there:
+
+```bash
+for i in 1 2; do echo "$i:$?"; false; continue; done   # was 1:0 2:1, bash says 1:0 2:0
+```
+
 `continue` sets the status at the point it runs but does not pin it: a later iteration still overwrites it, so `for i in 1 2; do if [ $i = 1 ]; then true; continue; fi; false; done` is still 1. A loop that ends normally is unchanged and reports its last command, and `return` from a function still reports the last command rather than 0.
 
 Reported downstream as ai-ecoverse/slicc#2978.
