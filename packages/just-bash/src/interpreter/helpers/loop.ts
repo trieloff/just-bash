@@ -21,9 +21,27 @@ export interface LoopErrorResult {
   action: LoopAction;
   stdout: string;
   stderr: string;
+  /**
+   * Status the loop should adopt as "last command executed".
+   *
+   * For "break"/"continue" this is 0: bash's `break` and `continue` are
+   * builtins that return 0, and they are the last command the body ran, so
+   * the loop must not report the status of whatever failed before them.
+   * For "error" it is the failure status.
+   */
   exitCode?: number;
   error?: unknown;
 }
+
+/**
+ * Exit status of the `break`/`continue` builtins themselves.
+ *
+ * A loop left via `break`/`continue` reports this, not the status of the
+ * last command that ran before it:
+ *
+ *   while :; do false; break; done; echo $?   # 0, not 1
+ */
+export const BREAK_CONTINUE_STATUS = 0;
 
 /**
  * Handle errors thrown during loop body execution.
@@ -52,7 +70,12 @@ export function handleLoopError(
       error.stderr = stderr;
       return { action: "rethrow", stdout, stderr, error };
     }
-    return { action: "break", stdout, stderr };
+    return {
+      action: "break",
+      stdout,
+      stderr,
+      exitCode: BREAK_CONTINUE_STATUS,
+    };
   }
 
   if (error instanceof ContinueError) {
@@ -67,7 +90,12 @@ export function handleLoopError(
       error.stderr = stderr;
       return { action: "rethrow", stdout, stderr, error };
     }
-    return { action: "continue", stdout, stderr };
+    return {
+      action: "continue",
+      stdout,
+      stderr,
+      exitCode: BREAK_CONTINUE_STATUS,
+    };
   }
 
   if (
