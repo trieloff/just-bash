@@ -17,8 +17,9 @@
     "command": "set -u; unset JB_NOUNSET_J; echo \"${JB_NOUNSET_J}\"; echo reached",
     "files": {},
     "stdout": "",
-    "stderr": "/bin/bash: JB_NOUNSET_J: unbound variable\n",
-    "exitCode": 127
+    "stderr": "/bin/bash: line 1: JB_NOUNSET_J: unbound variable\n",
+    "exitCode": 127,
+    "locked": true
   },
   "42bf6bb9eaecafe8": {
     "command": "set -euo pipefail\nunset GITHUB_STEP_SUMMARY\nif [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then echo \"writing to $GITHUB_STEP_SUMMARY\"; else echo \"no step summary\"; fi\nGITHUB_STEP_SUMMARY=summary.md\nif [ -n \"${GITHUB_STEP_SUMMARY:-}\" ]; then echo \"report\" >> \"$GITHUB_STEP_SUMMARY\"; fi\ncat summary.md",
@@ -66,8 +67,9 @@
     "command": "set -u; unset JB_NOUNSET_I; echo \"${#JB_NOUNSET_I}\"; echo reached",
     "files": {},
     "stdout": "",
-    "stderr": "/bin/bash: JB_NOUNSET_I: unbound variable\n",
-    "exitCode": 127
+    "stderr": "/bin/bash: line 1: JB_NOUNSET_I: unbound variable\n",
+    "exitCode": 127,
+    "locked": true
   },
   "c1e67d7cfd1e8f6f": {
     "command": "set -u; unset JB_NOUNSET_E; echo \"[${JB_NOUNSET_E:+alt}]\"",

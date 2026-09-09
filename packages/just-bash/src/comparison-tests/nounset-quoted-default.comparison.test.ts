@@ -103,10 +103,13 @@ describe("nounset with a whole-word quoted default - GNU Bash Comparison", () =>
   });
 
   // `${#var}` and a bare `${var}` must still abort the script: no operator
-  // suppresses nounset there. Exit codes are excluded because bash -c reports
-  // an expansion error as 127 while just-bash reports 1 -- an unrelated
-  // pre-existing difference. src/interpreter/expansion/nounset-quoted-default.test.ts
-  // pins just-bash's own status and message.
+  // suppresses nounset there, so nothing is printed and `echo reached` never
+  // runs. Exit codes are excluded because bash -c reports an expansion error
+  // as 127 while just-bash reports 1 -- an unrelated pre-existing difference;
+  // src/interpreter/expansion/nounset-quoted-default.test.ts pins just-bash's
+  // own status and message exactly. Both fixtures are locked to their Linux
+  // (bash 5) diagnostic, which inserts "line 1: " where macOS bash 3.2 does
+  // not; the recorded stderr is never compared, only kept from drifting.
   const stdoutOnly = { compareExitCode: false };
 
   it("still reports an unbound variable for a whole-word quoted ${#var}", async () => {
