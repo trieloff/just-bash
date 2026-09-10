@@ -10,8 +10,9 @@
     "command": "a='$(echo 1)'\nb=a\necho \"[$(( b ))]\"\necho \"status=$?\"",
     "files": {},
     "stdout": "status=1\n",
-    "stderr": "/bin/bash: line 2: $(echo 1): syntax error: operand expected (error token is \"$(echo 1)\")\n",
-    "exitCode": 0
+    "stderr": "/bin/bash: line 3: $(echo 1): syntax error: operand expected (error token is \"$(echo 1)\")\n",
+    "exitCode": 0,
+    "locked": true
   },
   "1a57bbd4c7f457cc": {
     "command": "echo $(( $(f() { :; }; echo 1) ))\ntype f >/dev/null 2>&1 && echo leaked || echo isolated",
@@ -45,8 +46,9 @@
     "command": "v='$(echo 1)'\necho \"[$(( $(echo v) ))]\"\necho \"status=$?\"",
     "files": {},
     "stdout": "status=1\n",
-    "stderr": "/bin/bash: line 1: $(echo 1): syntax error: operand expected (error token is \"$(echo 1)\")\n",
-    "exitCode": 0
+    "stderr": "/bin/bash: line 2: $(echo 1): syntax error: operand expected (error token is \"$(echo 1)\")\n",
+    "exitCode": 0,
+    "locked": true
   },
   "b9c0490e3bae3f1a": {
     "command": "K=1\necho $(( $(K=99; echo 2) ))\necho \"K=$K\"",
