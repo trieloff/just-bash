@@ -86,8 +86,8 @@
     "stderr": "",
     "exitCode": 0
   },
-  "fc53281d19bfc343": {
-    "command": "mktemp -q bad.XX 2>&1",
+  "fc1a10215c0a582e": {
+    "command": "LC_ALL=C mktemp -q bad.XX 2>&1",
     "files": {},
     "stdout": "mktemp: too few X's in template 'bad.XX'\n",
     "stderr": "",

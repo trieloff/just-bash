@@ -137,6 +137,7 @@ describe("mktemp - Real Bash Comparison", () => {
 
   it("does not suppress invalid-template diagnostics under -q", async () => {
     const env = await setupFiles(testDir, {});
-    await compareOutputs(env, testDir, "mktemp -q bad.XX 2>&1");
+    // GNU localizes diagnostic quotes; keep record mode stable across locales.
+    await compareOutputs(env, testDir, "LC_ALL=C mktemp -q bad.XX 2>&1");
   });
 });
