@@ -737,9 +737,39 @@ export class Bash {
         execEnv.set("PWD", newPwd);
       }
 
+      // Per-exec env vars are the environment of the new shell, so they are
+      // exported to its children (nested sh/bash). With replaceEnv the
+      // parent's exports must not survive either. Copy the set so an export
+      // inside this exec does not leak into later ones. Only valid names can
+      // be exported: nested sh/bash passes positional parameters ("0", "#",
+      // "1") through env, and those must not leak into grandchildren.
+      const exportedVars = effectiveOptions.replaceEnv
+        ? new Set<string>()
+        : new Set(this.state.exportedVars);
+      for (const key of Object.keys(effectiveOptions.env ?? {})) {
+        if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          exportedVars.add(key);
+        }
+      }
+      if (newPwd !== undefined) {
+        exportedVars.add("PWD");
+      }
+
+      // SHELLOPTS and BASHOPTS are maintained by the shell itself rather
+      // than inherited, so a replaced environment must not drop them.
+      if (effectiveOptions.replaceEnv) {
+        if (!execEnv.has("SHELLOPTS")) {
+          execEnv.set("SHELLOPTS", buildShellopts(this.state.options));
+        }
+        if (!execEnv.has("BASHOPTS")) {
+          execEnv.set("BASHOPTS", buildBashopts(this.state.shoptOptions));
+        }
+      }
+
       const execState: InterpreterState = {
         ...this.state,
         env: execEnv,
+        exportedVars,
         arrays: effectiveOptions.replaceEnv
           ? new Map()
           : cloneArrays(this.state.arrays),
