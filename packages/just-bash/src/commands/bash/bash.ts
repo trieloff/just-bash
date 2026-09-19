@@ -126,13 +126,6 @@ export const shCommand: RuntimeCommand = {
   },
 };
 
-/**
- * Variables a new shell sets from its own build and host rather than from
- * the environment. They are carried over from the parent shell, which
- * initialized them the same way.
- */
-const INHERITED_SHELL_VARS = ["OSTYPE", "MACHTYPE", "HOSTTYPE", "HOSTNAME"];
-
 async function executeScript(
   script: string,
   scriptName: string,
@@ -147,28 +140,14 @@ async function executeScript(
     };
   }
 
-  // Build environment for the exec call. The nested shell starts from a
-  // replaced environment, like a real child process: only exported variables
-  // (including prefix assignments like "FOO=bar sh -c '...'") are inherited,
-  // on top of the variables a new shell initializes for itself. Positional
-  // parameters are passed alongside.
+  // The nested shell is a new process: its environment is the parent's
+  // exported variables (including prefix assignments like
+  // "FOO=bar sh -c '...'"), plus the positional parameters. The exec entry
+  // initializes the shell's own variables (IFS, OPTIND, ...) on top.
   // Use null-prototype object to prevent prototype pollution
-  const shellInitEnv = Object.create(null) as Record<string, string>;
-  // Like bash, a shell started without PATH gets a default one.
-  shellInitEnv.PATH = "/usr/bin:/bin";
-  for (const name of INHERITED_SHELL_VARS) {
-    const value = ctx.env.get(name);
-    if (value !== undefined) {
-      shellInitEnv[name] = value;
-    }
-  }
   const positionalEnv = mergeToNullPrototype(
-    shellInitEnv,
-    ctx.exportedEnv || {},
+    ctx.exportedEnv ?? Object.create(null),
     {
-      // Like bash, never import IFS or OPTIND from the environment.
-      IFS: " \t\n",
-      OPTIND: "1",
       "0": scriptName,
       "#": String(scriptArgs.length),
       "@": scriptArgs.join(" "),
@@ -198,13 +177,13 @@ async function executeScript(
   const result = nestedExec
     ? await nestedExec(scriptToRun, {
         env: positionalEnv,
-        replaceEnv: true,
+        newShell: true,
         cwd: ctx.cwd,
         signal: ctx.signal,
       })
     : await ctx.exec(scriptToRun, {
         env: positionalEnv,
-        replaceEnv: true,
+        newShell: true,
         cwd: ctx.cwd,
         stdin: latin1FromBytes(ctx.stdin),
         stdinKind: "bytes",

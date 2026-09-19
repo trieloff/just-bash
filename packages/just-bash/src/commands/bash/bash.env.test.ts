@@ -114,4 +114,62 @@ describe("nested sh/bash environment", () => {
     const result = await bash.exec("cd /tmp; sh -c 'pwd; echo $PWD'");
     expect(result.stdout).toBe("/tmp\n/tmp\n");
   });
+
+  describe("variables the new shell initializes itself", () => {
+    it("are not exported to the child's children", async () => {
+      const bash = new Bash();
+      const result = await bash.exec(
+        "unset PATH; sh -c 'IFS=:; export -p' | grep -cE ' (PATH|IFS|OPTIND|OSTYPE|HOSTNAME|SHELLOPTS|BASHOPTS)='",
+      );
+      expect(result.stdout).toBe("0\n");
+    });
+
+    it("do not copy unexported values from the parent", async () => {
+      const bash = new Bash();
+      const result = await bash.exec(
+        "OSTYPE=secret HOSTNAME=secret; export -n OSTYPE HOSTNAME; sh -c 'echo $OSTYPE $HOSTNAME'",
+      );
+      expect(result.stdout).toBe("linux-gnu localhost\n");
+    });
+
+    it("take exported values from the environment", async () => {
+      const bash = new Bash();
+      const result = await bash.exec(
+        "export HOSTNAME=mine; sh -c 'echo $HOSTNAME'",
+      );
+      expect(result.stdout).toBe("mine\n");
+    });
+  });
+
+  it("env and time do not export the shell's variables", async () => {
+    const bash = new Bash();
+    const result = await bash.exec(
+      "FOO=secret; env sh -c 'echo [$FOO]'; time sh -c 'echo [$FOO]' 2>/dev/null",
+    );
+    expect(result.stdout).toBe("[]\n[]\n");
+  });
+
+  it("host replaceEnv keeps the environment free of shell variables", async () => {
+    const bash = new Bash();
+    const result = await bash.exec("printenv", {
+      env: { A: "1" },
+      replaceEnv: true,
+    });
+    expect(result.stdout).toBe("A=1\n");
+  });
+
+  it("cd - fails in a child that did not inherit OLDPWD", async () => {
+    const bash = new Bash();
+    const result = await bash.exec(
+      "cd /tmp; export -n OLDPWD; sh -c 'cd -'; echo rc=$?",
+    );
+    expect(result.stdout).toBe("rc=1\n");
+    expect(result.stderr).toBe("bash: cd: OLDPWD not set\n");
+  });
+
+  it("cd - works in a child that inherited OLDPWD", async () => {
+    const bash = new Bash();
+    const result = await bash.exec("cd /tmp; sh -c 'cd -'");
+    expect(result.stdout).toBe("/home/user\n");
+  });
 });
