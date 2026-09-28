@@ -149,6 +149,39 @@ describe("nested sh/bash environment", () => {
     expect(result.stdout).toBe("[]\n[]\n");
   });
 
+  describe("through wrappers that exec (env, time, timeout)", () => {
+    it("keep exports made earlier in the same script", async () => {
+      const bash = new Bash();
+      const result = await bash.exec(
+        "export FOO=bar; env sh -c 'echo [$FOO]'; timeout 5 sh -c 'echo [$FOO]'",
+      );
+      expect(result.stdout).toBe("[bar]\n[bar]\n");
+    });
+
+    it("keep exports from functions, subshells and prefix assignments", async () => {
+      const bash = new Bash();
+      const result = await bash.exec(
+        [
+          "f() { export A=fn; }; f",
+          "(export B=sub; env sh -c 'echo [$A] [$B]')",
+          "env sh -c 'echo [$A] [$B]'",
+          "C=pref timeout 5 sh -c 'echo [$C]'",
+        ].join("\n"),
+      );
+      expect(result.stdout).toBe("[fn] [sub]\n[fn] []\n[pref]\n");
+    });
+
+    it("do not restore the constructor env under replaceEnv", async () => {
+      const bash = new Bash({ env: { SECRET: "example-only" } });
+      const result = await bash.exec("timeout 5 printenv SECRET", {
+        env: {},
+        replaceEnv: true,
+      });
+      expect(result.stdout).toBe("");
+      expect(result.exitCode).toBe(1);
+    });
+  });
+
   it("host replaceEnv keeps the environment free of shell variables", async () => {
     const bash = new Bash();
     const result = await bash.exec("printenv", {

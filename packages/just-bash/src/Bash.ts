@@ -673,6 +673,7 @@ export class Bash {
     parentSignal: AbortSignal | undefined,
     stdinAlreadyAccounted = false,
     shouldLogResult = true,
+    callerState?: InterpreterState,
   ): Promise<BashExecResult> {
     const finishResult = (result: BashExecResult): BashExecResult =>
       shouldLogResult ? this.logResult(result) : result;
@@ -732,12 +733,14 @@ export class Bash {
         }
       }
 
-      // Create environment for this execution
+      // Create environment for this execution. A recursive exec (from `env`,
+      // `time`, `timeout`, ...) runs in the calling execution, so it starts
+      // from that execution's live variables rather than the instance's.
       const replaceEnv =
         effectiveOptions.replaceEnv || effectiveOptions.newShell;
       const execEnv = replaceEnv
         ? new Map<string, string>()
-        : new Map(this.state.env);
+        : new Map((callerState ?? this.state).env);
       // Merge in options.env
       if (effectiveOptions.env) {
         for (const [key, value] of Object.entries(effectiveOptions.env)) {
@@ -752,15 +755,20 @@ export class Bash {
       // Decide which variables the new shell exports to its children. Only
       // the host API and new shells treat `env` as the environment; internal
       // callers such as `env` and `time` pass the full variable map and keep
-      // the persistent export set. The set is always copied so an `export` in
-      // one exec does not leak into later ones. Only valid names can be
-      // exported: nested sh/bash passes positional parameters ("0", "#", "1")
-      // through env.
-      const exportsEnv = execDepth === 0 || effectiveOptions.newShell;
+      // the caller's export set, including prefix exports (`FOO=x time ...`).
+      // The set is always copied so an `export` in one exec does not leak
+      // into later ones. Only valid names can be exported: nested sh/bash
+      // passes positional parameters ("0", "#", "1") through env.
+      const exportsEnv = !callerState || effectiveOptions.newShell;
       const exportedVars =
         replaceEnv && exportsEnv
           ? new Set<string>()
-          : new Set(this.state.exportedVars);
+          : callerState
+            ? new Set([
+                ...(callerState.exportedVars ?? []),
+                ...(callerState.tempExportedVars ?? []),
+              ])
+            : new Set(this.state.exportedVars);
       if (exportsEnv) {
         for (const key of Object.keys(effectiveOptions.env ?? {})) {
           if (/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
@@ -880,6 +888,8 @@ export class Bash {
                 execDepth + 1,
                 effectiveOptions.signal,
                 childStdinAlreadyAccounted,
+                true,
+                execState,
               ),
             fetch: this.secureFetch,
             sleep: this.sleepFn,
