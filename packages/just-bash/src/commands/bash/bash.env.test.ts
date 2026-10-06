@@ -154,7 +154,7 @@ describe("nested sh/bash environment", () => {
   it("env and time do not export the shell's variables", async () => {
     const bash = new Bash();
     const result = await bash.exec(
-      "FOO=secret; env sh -c 'echo [$FOO]'; time sh -c 'echo [$FOO]' 2>/dev/null",
+      "FOO=secret; env sh -c 'echo [$FOO]'; command time sh -c 'echo [$FOO]' 2>/dev/null",
     );
     expect(result.stdout).toBe("[]\n[]\n");
   });
@@ -222,25 +222,6 @@ describe("nested sh/bash environment", () => {
       "unset OLDPWD; bash -c 'OLDPWD=/; cd -; pwd'",
     );
     expect(result.stdout).toBe("/\n/\n");
-    expect(result.stderr).toBe("");
-    expect(result.exitCode).toBe(0);
-  });
-
-  it("cd - fails when OLDPWD is unset after changing directory", async () => {
-    const bash = new Bash();
-    const result = await bash.exec("cd /tmp; unset OLDPWD; cd -");
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe("bash: cd: OLDPWD not set\n");
-    expect(result.exitCode).toBe(1);
-    expect(result.env.PWD).toBe("/tmp");
-  });
-
-  it("cd - accepts an empty OLDPWD without changing directory", async () => {
-    const bash = new Bash();
-    const result = await bash.exec(
-      "unset OLDPWD; bash -c 'CDPATH=/tmp; OLDPWD=; cd -; pwd'",
-    );
-    expect(result.stdout).toBe("\n/home/user\n");
     expect(result.stderr).toBe("");
     expect(result.exitCode).toBe(0);
   });

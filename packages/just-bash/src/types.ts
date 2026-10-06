@@ -77,10 +77,10 @@ export interface CommandExecOptions {
    */
   replaceEnv?: boolean;
   /**
-   * Start a new shell process, as `sh`/`bash` do. Implies `replaceEnv`: `env`
+   * Initialize a nested shell's environment, as `sh`/`bash` do. Implies `replaceEnv`: `env`
    * is the child's environment, so its keys are exported, and the shell
-   * initializes its own unexported variables (IFS, OPTIND, SHELLOPTS, ...)
-   * on top, the way bash does at startup.
+   * initializes startup variables (IFS, OPTIND, SHELLOPTS, ...) without
+   * adding export attributes. Inherited export attributes are preserved.
    */
   newShell?: boolean;
   /**
