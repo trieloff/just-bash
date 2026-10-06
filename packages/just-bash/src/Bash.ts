@@ -781,9 +781,8 @@ export class Bash {
       }
 
       if (effectiveOptions.newShell) {
-        // A new shell initializes these itself, unexported: defaults for
-        // what the environment lacks, and IFS, OPTIND and the option
-        // variables regardless of it.
+        // Startup defaults do not add export attributes. Resetting inherited
+        // values retains their existing export attributes.
         if (!execEnv.has("PATH")) {
           execEnv.set("PATH", DEFAULT_PATH);
         }
@@ -791,9 +790,6 @@ export class Bash {
           if (!execEnv.has(name)) {
             execEnv.set(name, value);
           }
-        }
-        for (const name of ["IFS", "OPTIND", "SHELLOPTS", "BASHOPTS"]) {
-          exportedVars.delete(name);
         }
         execEnv.set("IFS", " \t\n");
         execEnv.set("OPTIND", "1");

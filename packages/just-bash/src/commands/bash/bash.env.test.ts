@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { Bash } from "../../Bash.js";
 
-// Nested sh/bash must start from the parent's exported environment only,
-// like a real child process. Expectations verified against bash 3.2 and 5.3.
+// Nested sh/bash inherits only exported variables. Expectations verified
+// against bash 3.2 and 5.3; this does not cover other shell-state isolation.
 describe("nested sh/bash environment", () => {
   describe("per-exec env with replaceEnv", () => {
     const opts = {
@@ -91,6 +91,16 @@ describe("nested sh/bash environment", () => {
       `export IFS=: OPTIND=5; sh -c 'printf "[%s] %s\\n" "$IFS" "$OPTIND"'`,
     );
     expect(result.stdout).toBe("[ \t\n] 1\n");
+  });
+
+  it("retains inherited export attributes when resetting startup values", async () => {
+    const bash = new Bash();
+    const result = await bash.exec(
+      `export IFS=: OPTIND=5; bash -c 'export -p | grep -oE " (IFS|OPTIND)="'`,
+    );
+    expect(result.stdout).toBe(" IFS=\n OPTIND=\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
   });
 
   it("shell-initialized variables are still set in the child", async () => {
@@ -204,5 +214,34 @@ describe("nested sh/bash environment", () => {
     const bash = new Bash();
     const result = await bash.exec("cd /tmp; sh -c 'cd -'");
     expect(result.stdout).toBe("/home/user\n");
+  });
+
+  it("cd - uses OLDPWD assigned after child startup", async () => {
+    const bash = new Bash();
+    const result = await bash.exec(
+      "unset OLDPWD; bash -c 'OLDPWD=/; cd -; pwd'",
+    );
+    expect(result.stdout).toBe("/\n/\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("cd - fails when OLDPWD is unset after changing directory", async () => {
+    const bash = new Bash();
+    const result = await bash.exec("cd /tmp; unset OLDPWD; cd -");
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("bash: cd: OLDPWD not set\n");
+    expect(result.exitCode).toBe(1);
+    expect(result.env.PWD).toBe("/tmp");
+  });
+
+  it("cd - accepts an empty OLDPWD without changing directory", async () => {
+    const bash = new Bash();
+    const result = await bash.exec(
+      "unset OLDPWD; bash -c 'CDPATH=/tmp; OLDPWD=; cd -; pwd'",
+    );
+    expect(result.stdout).toBe("\n/home/user\n");
+    expect(result.stderr).toBe("");
+    expect(result.exitCode).toBe(0);
   });
 });

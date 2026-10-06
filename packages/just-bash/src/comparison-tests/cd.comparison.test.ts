@@ -18,6 +18,18 @@ describe("cd command - Real Bash Comparison", () => {
   });
 
   describe("basic cd", () => {
+    it.each([
+      "unset OLDPWD; OLDPWD=/; cd -; pwd",
+      "cd /; CDPATH=/tmp; OLDPWD=; cd -; pwd",
+    ])("uses the live OLDPWD value: %s", async (script) => {
+      const env = await setupFiles(testDir, {});
+      const envResult = await env.exec(script);
+      const realResult = await runRealBash(script, testDir);
+      expect(envResult.stdout).toBe(realResult.stdout);
+      expect(envResult.stderr).toBe(realResult.stderr);
+      expect(envResult.exitCode).toBe(realResult.exitCode);
+    });
+
     it("should change directory and pwd should reflect it", async () => {
       const env = await setupFiles(testDir, {
         "subdir/file.txt": "content",
